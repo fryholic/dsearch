@@ -9,7 +9,8 @@
     "node": ">=24.19.0 <25"
   },
   "scripts": {
-    "check": "node scripts/check-structure.mjs && node scripts/build-tokens.mjs --check",
+    "check": "node scripts/check-structure.mjs && node scripts/build-tokens.mjs --check && pnpm test:security",
+    "test:security": "node --test tests/security/*.test.mjs",
     "local:setup": "node scripts/setup-local.mjs",
     "tokens:build": "node scripts/build-tokens.mjs",
     "mockup": "node scripts/serve-mockup.mjs"

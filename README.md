@@ -27,6 +27,6 @@ pnpm check
 
 ## 로컬 자료
 
-PRD·HLD·LLD·디자인 가이드·IA·목업은 docs/에 로컬로 보관합니다. pnpm local:setup은 이 자료와 artifacts/, .local/을 해당 checkout의 .git/info/exclude에 추가합니다. GitHub 저장소에는 이 설계 문서를 올리지 않습니다. 제외 설정은 clone에 자동 전달되지 않으므로 새 checkout에서 위 명령을 실행하세요.
+PRD·HLD·LLD·디자인 가이드·IA·목업은 docs/에 로컬로 보관합니다. pnpm local:setup은 이 자료와 artifacts/, .local/을 해당 checkout의 .git/info/exclude에 추가합니다. 설계 자료는 커밋에서 제외하며 새 checkout에서는 위 명령으로 제외 설정을 적용하세요.
 
-로컬 목업 자료가 있는 환경에서는 pnpm mockup으로 볼 수 있습니다. 목업은 합성 자료만 사용하며 검색·모델·원문 파일에 연결하지 않습니다.
+로컬 목업 자료가 있는 환경에서는 pnpm mockup으로 볼 수 있습니다. 목업은 합성 자료만 사용하며 검색·모델·원문 파일에 연결하지 않습니다. 서버는 127.0.0.1에만 바인딩하고, 시작할 때 검증한 6개 파일의 복사본을 제공합니다. 심볼릭 링크·일반 파일이 아닌 자료·1 MiB를 넘는 파일은 거부하며, 목업을 수정한 뒤에는 서버를 다시 시작하세요.
