@@ -99,6 +99,8 @@ test("rejects traversal, private paths, foreign hosts, and cross-origin requests
     assert.equal((await request(port, "/", { headers })).status, 403);
   }
   assert.equal((await request(port, "/", { headers: ["Origin: http://127.0.0.1:" + port, "Sec-Fetch-Site: same-origin"] })).status, 200);
+  assert.equal((await request(port, "/", { headers: ["Sec-Fetch-Site: cross-site", "Sec-Fetch-Mode: navigate", "Sec-Fetch-Dest: document"] })).status, 200);
+  assert.equal((await request(port, "/", { headers: ["Sec-Fetch-Site: cross-site", "Sec-Fetch-Mode: no-cors", "Sec-Fetch-Dest: script"] })).status, 403);
   assert.equal((await request(port, "/", { host: "localhost:" + port })).status, 200);
   assert.equal((await request(port, "/", { method: "POST" })).status, 405);
   assert.equal((await request(port, "/", { method: "OPTIONS" })).status, 405);

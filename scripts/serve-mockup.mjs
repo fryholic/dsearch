@@ -64,8 +64,9 @@ const server = createServer({
   }
   const origin = "http://" + req.headers.host;
   const site = req.headers["sec-fetch-site"];
+  const documentNavigation = req.headers["sec-fetch-mode"] === "navigate" && req.headers["sec-fetch-dest"] === "document";
   if ((req.headers.origin !== undefined && req.headers.origin !== origin) ||
-      (site !== undefined && site !== "same-origin" && site !== "none")) {
+      (site !== undefined && site !== "same-origin" && site !== "none" && !documentNavigation)) {
     reply(403, "Forbidden"); return;
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
