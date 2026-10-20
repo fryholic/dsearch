@@ -57,18 +57,21 @@ let minimumText = Infinity;
 for (const appearance of appearances) for (const theme of ["light", "dark"]) {
   const values = valuesFor(appearance, theme);
   for (const value of Object.values(values)) assert.match(value, /^#[0-9A-F]{6}$/);
+  if (theme === "light") for (const surface of ["bg.canvas", "bg.surface", "bg.subtle", "nav.bg", "nav.hover", "nav.selectedBg", "result.selectedBg", "evidence.bg", "action.soft", "accent.bg", "positive.bg", "warning.bg", "critical.bg"]) {
+    assert.equal(values[surface], "#FFFFFF", appearance + " " + surface + " must remain white");
+  }
   const textPairs = [
     ["fg.primary","bg.surface"],["fg.secondary","bg.surface"],
     ["fg.primary","bg.canvas"],["fg.secondary","bg.canvas"],
     ["fg.secondary","bg.subtle"],["action.onPrimary","action.primary"],
-    ["action.primary","bg.surface"],["action.primary","bg.canvas"],
-    ["action.primary","action.soft"],
+    ["action.fg","bg.surface"],["action.fg","bg.canvas"],
+    ["action.fg","action.soft"],
     ["accent.fg","accent.bg"],["accent.fg","bg.canvas"],["positive.fg","positive.bg"],
     ["warning.fg","warning.bg"],["critical.fg","critical.bg"],
     ["nav.fg","nav.bg"],["nav.secondary","nav.bg"],
     ["nav.fg","nav.hover"],["nav.secondary","nav.hover"],
     ["nav.selectedFg","nav.selectedBg"],["nav.brandFg","nav.brandBg"],
-    ["evidence.fg","evidence.bg"],["evidence.border","evidence.bg"],
+    ["evidence.fg","evidence.bg"],["evidence.label","evidence.bg"],
     ["fg.primary","result.selectedBg"],["fg.secondary","result.selectedBg"]
   ];
   for(const [fg,bg] of textPairs) {
@@ -76,7 +79,7 @@ for (const appearance of appearances) for (const theme of ["light", "dark"]) {
     minimumText = Math.min(minimumText, ratio);
     assert.ok(ratio >= 4.5, appearance+" "+theme+" "+fg+"/"+bg+" contrast failed: "+ratio);
   }
-  for(const bg of ["bg.surface","bg.canvas"]) for (const fg of ["stroke.control", "focus.ring"]) {
+  for(const bg of ["bg.surface","bg.canvas"]) for (const fg of ["stroke.control", "focus.ring", "selection.stroke"]) {
     assert.ok(contrast(values[fg],values[bg]) >= 3, appearance+" "+theme+" "+fg+"/"+bg+" control contrast failed");
   }
 }
