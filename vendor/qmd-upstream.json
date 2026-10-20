@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/tobi/qmd",
+  "sourceVersion": "2.8.3",
+  "commit": "86d2365d17fc682e491c2c53d1e4a884aee8682a",
+  "license": "MIT",
+  "integrationStatus": "planned",
+  "requiredCompatibilityPatches": [
+    "EP-01",
+    "EP-02",
+    "EP-03",
+    "EP-04"
+  ],
+  "engineArtifactSha256": null
+}

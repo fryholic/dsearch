@@ -1,0 +1,37 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  apps/cli: {}
+
+  apps/daemon: {}
+
+  apps/mcp: {}
+
+  apps/obsidian: {}
+
+  apps/web: {}
+
+  packages/catalog: {}
+
+  packages/compiler: {}
+
+  packages/contracts: {}
+
+  packages/engine-qmd: {}
+
+  packages/evaluation: {}
+
+  packages/generations: {}
+
+  packages/runtime: {}
+
+  packages/search: {}
+
+  packages/ui: {}

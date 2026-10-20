@@ -1,0 +1,17 @@
+{
+  "name": "dsearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local document search workspace built around QMD",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  },
+  "scripts": {
+    "check": "node scripts/check-structure.mjs && node scripts/build-tokens.mjs --check",
+    "local:setup": "node scripts/setup-local.mjs",
+    "tokens:build": "node scripts/build-tokens.mjs",
+    "mockup": "node scripts/serve-mockup.mjs"
+  }
+}
