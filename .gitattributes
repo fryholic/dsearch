@@ -1,0 +1,2 @@
+# Blank unified-diff context lines contain a meaningful single-space marker.
+vendor/qmd-patches/*.patch whitespace=-blank-at-eol

@@ -1,0 +1,17 @@
+{
+  "scope": "Source mapping development fixtures; excluded from ranking judgments",
+  "cases": [
+    {
+      "directory": "nfc",
+      "filename": "수학.md",
+      "title": "공통 제목",
+      "body": "\ufeff# 공통 제목\r\n\r\n한글 é 😀 표의 조건\r\n\r\n| 항목 | 의미 |\r\n| --- | --- |\r\n| $p$ | 좌표의 법 |\r\n| $n$ | 스칼라의 법 |\r\n\r\n표에 이어지는 조건 설명.\r\n\r\n$$\r\nQ=dG\r\n$$\r\n\r\n점의 좌표에 정수를 직접 곱하지 않는다.\r\n"
+    },
+    {
+      "directory": "nfd",
+      "filename": "수학.md",
+      "title": "공통 제목",
+      "body": "# 공통 제목\n\nEnglish and Korean code example.\n\n```text\n# This is code, not a heading\n한글 😀 é\n```\n\nKeep code and its explanation together.\n"
+    }
+  ]
+}

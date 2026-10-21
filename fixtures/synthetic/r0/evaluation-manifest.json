@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "corpus_sha256": "639daac9b268c063570be2cfcbe65fdba6da97b26b609f0dbfb3d25bef3097ee",
+  "document_count": 54,
+  "tuning_count": 20,
+  "holdout": {
+    "required_count": 40,
+    "status": "reserved-for-r1",
+    "executed": false
+  },
+  "split_policy": {
+    "tuning": 20,
+    "holdout": 40,
+    "group_keys": [
+      "source_family",
+      "near_duplicate_group"
+    ],
+    "holdout_used_for_tuning": false
+  },
+  "judgment": "Author-labeled synthetic development fixture; not a measurement of the private vault or R1 fixed evaluation."
+}

@@ -9,10 +9,27 @@
     "node": ">=24.19.0 <25"
   },
   "scripts": {
-    "check": "node scripts/check-structure.mjs && node scripts/build-tokens.mjs --check && pnpm test:security",
+    "check": "pnpm build && node scripts/check-structure.mjs && node scripts/build-tokens.mjs --check && pnpm test:unit && pnpm test:security",
     "test:security": "node --test tests/security/*.test.mjs",
     "local:setup": "node scripts/setup-local.mjs",
     "tokens:build": "node scripts/build-tokens.mjs",
-    "mockup": "node scripts/serve-mockup.mjs"
+    "mockup": "node scripts/serve-mockup.mjs",
+    "build": "tsc -b && node scripts/build-web.mjs",
+    "typecheck": "tsc -b --pretty false",
+    "test:unit": "node --test tests/contract/*.test.mjs tests/integration/*.test.mjs",
+    "engine:prepare": "pnpm build && node scripts/prepare-engine.mjs",
+    "models:prepare": "pnpm build && node scripts/prepare-models.mjs",
+    "r0:prepare": "pnpm engine:prepare && pnpm models:prepare",
+    "test:r0": "pnpm build && node --test --test-concurrency=1 tests/r0/*.test.mjs",
+    "r0:inspect": "pnpm build && node scripts/r0-inspect.mjs",
+    "r0:benchmark": "pnpm build && node scripts/r0-benchmark.mjs",
+    "r0:verify": "node scripts/r0-verify.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
   }
 }

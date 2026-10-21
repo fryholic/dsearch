@@ -1,0 +1,47 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/ui"
+    },
+    {
+      "path": "packages/contracts"
+    },
+    {
+      "path": "packages/catalog"
+    },
+    {
+      "path": "packages/runtime"
+    },
+    {
+      "path": "packages/search"
+    },
+    {
+      "path": "packages/engine-qmd"
+    },
+    {
+      "path": "packages/evaluation"
+    },
+    {
+      "path": "packages/generations"
+    },
+    {
+      "path": "packages/compiler"
+    },
+    {
+      "path": "apps/web"
+    },
+    {
+      "path": "apps/mcp"
+    },
+    {
+      "path": "apps/cli"
+    },
+    {
+      "path": "apps/daemon"
+    },
+    {
+      "path": "apps/obsidian"
+    }
+  ]
+}

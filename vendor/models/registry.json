@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "role": "embed",
+      "repository": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "revision": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
+      "filename": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+      "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+      "bytes": 639150592
+    },
+    {
+      "role": "rerank",
+      "repository": "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF",
+      "revision": "a02f48bb4f057028298c21fa033da2b30d7742d5",
+      "filename": "qwen3-reranker-0.6b-q8_0.gguf",
+      "sha256": "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+      "bytes": 639153184
+    },
+    {
+      "role": "reference",
+      "repository": "ggml-org/embeddinggemma-300M-GGUF",
+      "revision": "0f741b5a6585bd53aeb15cd1372c56f2a0f65e12",
+      "filename": "embeddinggemma-300M-Q8_0.gguf",
+      "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+      "bytes": 333590944
+    }
+  ]
+}

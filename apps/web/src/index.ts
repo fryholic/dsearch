@@ -1,2 +1,1 @@
-// Workspace boundary for apps/web. Runtime implementation is pending.
-export {};
+export { createSearchClient as createWebClient } from "@dsearch/contracts/client";

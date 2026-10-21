@@ -1,0 +1,506 @@
+{
+  "schema_version": 1,
+  "kind": "synthetic-r0-development",
+  "documents": [
+    {
+      "id": "encoding",
+      "group": "encoding",
+      "title": "Canonical encoding",
+      "body": "# Canonical encoding\n\nASN.1의 canonical encoding은 같은 값을 동일한 바이트열로 표현하도록 인코딩 규칙을 정한다. 서명자와 검증자가 같은 입력을 사용하려면 해시 계산 전에 표현 규칙을 일치시켜야 한다. Canonical encoding produces identical bytes before hashing and signing.\n"
+    },
+    {
+      "id": "hashing",
+      "group": "hashing",
+      "title": "해시와 메시지 입력",
+      "body": "# 해시와 메시지 입력\n\n해시는 메시지의 의미가 아니라 실제 입력 바이트를 처리한다. 공백, 문자 인코딩 또는 필드 순서가 바뀌면 해시 입력이 달라질 수 있다. A cryptographic hash operates on bytes rather than semantic meaning.\n"
+    },
+    {
+      "id": "ecdsa",
+      "group": "ecdsa",
+      "title": "ECDSA 서명 관계",
+      "body": "# ECDSA 서명 관계\n\nECDSA는 생성점 G, 개인키 d, 공개키 Q=dG를 사용한다. 메시지 해시에서 정수 z를 얻고 임시 비밀 k에 대해 R=kG, r=x(R) mod n, s=k⁻¹(z+rd) mod n을 계산한다. 검증자는 X=s⁻¹zG+s⁻¹rQ를 계산하고 x(X) mod n과 r을 비교한다.\n\n개인키와 nonce는 비밀이다.\n\n$$\ns=k^{-1}(z+rd)\\pmod n\n$$\n\n이 식은 서명자와 검증자가 같은 임시점에 연결되도록 하는 관계다.\n"
+    },
+    {
+      "id": "nonce",
+      "group": "nonce",
+      "title": "ECDSA nonce 재사용",
+      "body": "# ECDSA nonce 재사용\n\nECDSA의 비밀 nonce k를 서로 다른 메시지에 재사용하면 서명식의 두 관계로 개인키가 노출될 수 있다. 매번 안전한 nonce 생성이나 검증된 결정적 nonce 절차가 필요하다. Reusing the signing nonce compromises the private key.\n"
+    },
+    {
+      "id": "kdf",
+      "group": "kdf",
+      "title": "공유 비밀과 KDF",
+      "body": "# 공유 비밀과 KDF\n\nECDH 공유 비밀은 키 도출 함수 KDF의 입력 자료다. HKDF는 Extract와 Expand 단계로 문맥과 출력 길이에 맞는 키 자료를 도출한다. A KDF derives application keys from shared secret material and protocol context.\n"
+    },
+    {
+      "id": "ecdh",
+      "group": "ecdh",
+      "title": "ECDH 공유 비밀",
+      "body": "# ECDH 공유 비밀\n\nAlice는 d_A와 Q_A=d_AG, Bob은 d_B와 Q_B=d_BG를 갖는다. 양쪽은 d_AQ_B=d_BQ_A라는 같은 점을 계산한다. ECDH establishes a common secret without sending the private scalars. ECDH 자체와 메시지 암호화는 다른 단계다.\n"
+    },
+    {
+      "id": "ecies",
+      "group": "ecies",
+      "title": "ECIES 암호화 구성",
+      "body": "# ECIES 암호화 구성\n\nECIES는 임시 타원곡선 키, ECDH, KDF와 대칭키 보호를 조합하는 암호화 구성이다. 수신자의 공개키를 사용해 키 자료를 보호하며 서명 알고리즘 ECDSA와 역할이 다르다. Public-key encryption protects confidentiality for an intended recipient.\n"
+    },
+    {
+      "id": "pki",
+      "group": "pki",
+      "title": "공개키와 인증서 신뢰",
+      "body": "# 공개키와 인증서 신뢰\n\n전자서명이 수학적으로 유효해도 그 공개키를 신뢰할 근거와 송신 권한은 별도로 확인해야 한다. PKI의 CA는 공개키와 사용 조건을 인증한다. A certificate binds a public key to validity conditions and authorization.\n"
+    },
+    {
+      "id": "permissions",
+      "group": "permissions",
+      "title": "V2X 인증서 권한",
+      "body": "# V2X 인증서 권한\n\nV2X 메시지를 검증할 때 서명뿐 아니라 인증서의 유효 기간과 허용 서비스도 확인한다. PSID와 SSP는 서비스와 권한 조건을 표현한다. Successful signature verification does not establish every application permission.\n"
+    },
+    {
+      "id": "butterfly",
+      "group": "butterfly",
+      "title": "Butterfly Key Expansion",
+      "body": "# Butterfly Key Expansion\n\n차량의 기본 키 A=aG에서 RA가 B_i=A+f(i)G를 만들고 발급기관이 c_iG를 더해 U_i=B_i+c_iG를 만든다. 차량은 d_i=(a+f(i)+c_i) mod n을 재구성한다. Butterfly expansion supports many pseudonym certificate keys from compact initial material.\n"
+    },
+    {
+      "id": "cubk",
+      "group": "cubk",
+      "title": "OBK UBK CUBK 비교",
+      "body": "# OBK UBK CUBK 비교\n\nOBK는 서명용과 응답 암호화용 기본 키 계열을 구분한다. UBK는 두 계열을 통합한다. CUBK는 발급 응답을 감싸는 별도의 외부 서명 계층을 간소화한다. 인증서 자체의 신뢰 검증까지 사라지는 것은 아니다.\n"
+    },
+    {
+      "id": "revocation",
+      "group": "revocation",
+      "title": "인증서 철회와 만료",
+      "body": "# 인증서 철회와 만료\n\n유효 기간이 끝나는 만료와 유효 기간 도중의 철회는 다르다. 수신자는 인증서 체인과 권한뿐 아니라 적용되는 철회 정보를 확인한다. Expiration and revocation represent different validity conditions.\n"
+    },
+    {
+      "id": "der",
+      "group": "der",
+      "title": "ASN.1 DER와 BER",
+      "body": "# ASN.1 DER와 BER\n\nASN.1은 추상 자료형을 정의하고 BER와 DER는 인코딩 규칙이다. DER는 BER의 제약된 canonical 표현을 정한다. Abstract values and encoded bytes are distinct. DER와 COER를 같은 인코딩 규칙으로 취급하지 않는다.\n"
+    },
+    {
+      "id": "utf8",
+      "group": "utf8",
+      "title": "문자와 UTF-16 위치",
+      "body": "# 문자와 UTF-16 위치\n\n한글 é와 이모지 😀가 포함된 텍스트에서는 바이트 수와 UTF-16 code unit 수가 다를 수 있다. BOM 제거와 CRLF의 LF 변환은 위치 계산용 정규화에 사용하고 원본 파일은 그대로 보존한다.\n"
+    },
+    {
+      "id": "oid",
+      "group": "oid",
+      "title": "전자서명 식별자 메모",
+      "body": "# 전자서명 식별자 메모\n\n이 합성 문서는 문자열 1.2.840.10045.4.3.2와 ecdsa-with-SHA256을 식별자 검색 시험에 사용한다. 숫자와 점이 포함된 정확한 문자열 검색은 전문 검색 토큰화와 구분한다.\n"
+    },
+    {
+      "id": "snapshot",
+      "group": "snapshot",
+      "title": "색인 세대와 게시",
+      "body": "# 색인 세대와 게시\n\n새 색인은 별도 세대에서 구축하고 검증 후 활성 포인터를 교체한다. 구축 중 실패하면 마지막 정상 세대를 사용한다. An incomplete index generation must not replace the active searchable generation.\n"
+    },
+    {
+      "id": "source-map",
+      "group": "source-map",
+      "title": "원문 구간 위치",
+      "body": "# 원문 구간 위치\n\n검색용 projection의 생성 헤더와 원문 본문은 source map으로 구분한다. 검색 근거는 원래 문서 revision과 줄 위치에서 읽는다. A generated heading is not a quotation from the original source.\n"
+    },
+    {
+      "id": "privacy",
+      "group": "privacy",
+      "title": "로컬 검색 캐시",
+      "body": "# 로컬 검색 캐시\n\n질의 확장과 리랭킹 캐시는 기본 영구 DB 대신 제한된 메모리에서 처리한다. 로그와 진단에는 사용자 질의나 문서 발췌를 남기지 않는다. Query-derived material should not persist in ordinary application logs or caches.\n"
+    },
+    {
+      "id": "other-00",
+      "group": "other-00",
+      "title": "화분 물주기",
+      "body": "# 화분 물주기\n\n이 문서는 화분 물주기에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-01",
+      "group": "other-01",
+      "title": "주방 정리",
+      "body": "# 주방 정리\n\n이 문서는 주방 정리에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-02",
+      "group": "other-02",
+      "title": "등산 준비",
+      "body": "# 등산 준비\n\n이 문서는 등산 준비에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-03",
+      "group": "other-03",
+      "title": "독서 일정",
+      "body": "# 독서 일정\n\n이 문서는 독서 일정에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-04",
+      "group": "other-04",
+      "title": "그림 도구",
+      "body": "# 그림 도구\n\n이 문서는 그림 도구에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-05",
+      "group": "other-05",
+      "title": "자전거 수리",
+      "body": "# 자전거 수리\n\n이 문서는 자전거 수리에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-06",
+      "group": "other-06",
+      "title": "창문 청소",
+      "body": "# 창문 청소\n\n이 문서는 창문 청소에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-07",
+      "group": "other-07",
+      "title": "커피 기록",
+      "body": "# 커피 기록\n\n이 문서는 커피 기록에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-08",
+      "group": "other-08",
+      "title": "보드게임 모임",
+      "body": "# 보드게임 모임\n\n이 문서는 보드게임 모임에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-09",
+      "group": "other-09",
+      "title": "가상의 여행 일정",
+      "body": "# 가상의 여행 일정\n\n이 문서는 가상의 여행 일정에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-10",
+      "group": "other-10",
+      "title": "사진 분류",
+      "body": "# 사진 분류\n\n이 문서는 사진 분류에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-11",
+      "group": "other-11",
+      "title": "노래 연습",
+      "body": "# 노래 연습\n\n이 문서는 노래 연습에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-12",
+      "group": "other-12",
+      "title": "우편물 정리",
+      "body": "# 우편물 정리\n\n이 문서는 우편물 정리에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-13",
+      "group": "other-13",
+      "title": "수납 상자",
+      "body": "# 수납 상자\n\n이 문서는 수납 상자에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-14",
+      "group": "other-14",
+      "title": "책장 배치",
+      "body": "# 책장 배치\n\n이 문서는 책장 배치에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-15",
+      "group": "other-15",
+      "title": "정원 꽃 이름",
+      "body": "# 정원 꽃 이름\n\n이 문서는 정원 꽃 이름에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-16",
+      "group": "other-16",
+      "title": "산책 경로",
+      "body": "# 산책 경로\n\n이 문서는 산책 경로에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-17",
+      "group": "other-17",
+      "title": "주간 운동 메모",
+      "body": "# 주간 운동 메모\n\n이 문서는 주간 운동 메모에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-18",
+      "group": "other-18",
+      "title": "기념일 목록",
+      "body": "# 기념일 목록\n\n이 문서는 기념일 목록에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-19",
+      "group": "other-19",
+      "title": "캠핑 물품",
+      "body": "# 캠핑 물품\n\n이 문서는 캠핑 물품에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-20",
+      "group": "other-20",
+      "title": "가상 지도",
+      "body": "# 가상 지도\n\n이 문서는 가상 지도에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-21",
+      "group": "other-21",
+      "title": "박물관 방문",
+      "body": "# 박물관 방문\n\n이 문서는 박물관 방문에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-22",
+      "group": "other-22",
+      "title": "도예 작품",
+      "body": "# 도예 작품\n\n이 문서는 도예 작품에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-23",
+      "group": "other-23",
+      "title": "피아노 연습",
+      "body": "# 피아노 연습\n\n이 문서는 피아노 연습에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-24",
+      "group": "other-24",
+      "title": "옷장 정리",
+      "body": "# 옷장 정리\n\n이 문서는 옷장 정리에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-25",
+      "group": "other-25",
+      "title": "전시 관람",
+      "body": "# 전시 관람\n\n이 문서는 전시 관람에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-26",
+      "group": "other-26",
+      "title": "필기구 목록",
+      "body": "# 필기구 목록\n\n이 문서는 필기구 목록에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-27",
+      "group": "other-27",
+      "title": "달리기 기록",
+      "body": "# 달리기 기록\n\n이 문서는 달리기 기록에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-28",
+      "group": "other-28",
+      "title": "가구 치수",
+      "body": "# 가구 치수\n\n이 문서는 가구 치수에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-29",
+      "group": "other-29",
+      "title": "공원 벤치",
+      "body": "# 공원 벤치\n\n이 문서는 공원 벤치에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-30",
+      "group": "other-30",
+      "title": "주말 요리",
+      "body": "# 주말 요리\n\n이 문서는 주말 요리에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-31",
+      "group": "other-31",
+      "title": "영화 감상",
+      "body": "# 영화 감상\n\n이 문서는 영화 감상에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-32",
+      "group": "other-32",
+      "title": "실내 조명",
+      "body": "# 실내 조명\n\n이 문서는 실내 조명에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-33",
+      "group": "other-33",
+      "title": "빨래 일정",
+      "body": "# 빨래 일정\n\n이 문서는 빨래 일정에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-34",
+      "group": "other-34",
+      "title": "가방 물품",
+      "body": "# 가방 물품\n\n이 문서는 가방 물품에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    },
+    {
+      "id": "other-35",
+      "group": "other-35",
+      "title": "가상 이야기",
+      "body": "# 가상 이야기\n\n이 문서는 가상 이야기에 관한 가상의 개인 기록이다. 날짜별 준비 사항과 관찰, 다음 활동을 적었다. 문서 검색 시험을 위한 합성 자료이며 암호 알고리즘이나 인증서 발급 절차를 설명하지 않는다.\n"
+    }
+  ],
+  "queries": [
+    {
+      "id": "dev-01",
+      "query": "서명 전에 동일한 바이트열을 만들어야 하는 이유",
+      "relevance": {
+        "encoding": 2,
+        "hashing": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-02",
+      "query": "same information different serialization before signature verification",
+      "relevance": {
+        "encoding": 2,
+        "hashing": 2,
+        "der": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-03",
+      "query": "ECDSA의 s 식과 검증점 X의 관계",
+      "relevance": {
+        "ecdsa": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-04",
+      "query": "비밀 nonce를 두 메시지에 다시 쓰면 어떤 문제가 있는가",
+      "relevance": {
+        "nonce": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-05",
+      "query": "shared secret to application encryption key",
+      "relevance": {
+        "kdf": 2,
+        "ecdh": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-06",
+      "query": "두 차량이 개인키를 보내지 않고 공유 비밀을 얻는 방법",
+      "relevance": {
+        "ecdh": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-07",
+      "query": "ECIES와 ECDSA의 역할 차이",
+      "relevance": {
+        "ecies": 2,
+        "ecdsa": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-08",
+      "query": "수학적으로 유효한 서명만으로 공개키를 믿을 수 없는 이유",
+      "relevance": {
+        "pki": 2,
+        "permissions": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-09",
+      "query": "PSID SSP가 허용 서비스에 미치는 의미",
+      "relevance": {
+        "permissions": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-10",
+      "query": "작은 초기 키 자료에서 여러 가명 인증서 키를 만드는 과정",
+      "relevance": {
+        "butterfly": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-11",
+      "query": "OBK UBK CUBK의 발급 응답 보호 차이",
+      "relevance": {
+        "cubk": 2,
+        "butterfly": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-12",
+      "query": "인증서 유효 기간 만료와 사용 도중 철회",
+      "relevance": {
+        "revocation": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-13",
+      "query": "ASN.1 BER DER 표현 규칙",
+      "relevance": {
+        "der": 2,
+        "encoding": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-14",
+      "query": "Korean emoji UTF-16 column and byte offsets",
+      "relevance": {
+        "utf8": 2,
+        "source-map": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-15",
+      "query": "ecdsa-with-SHA256",
+      "relevance": {
+        "oid": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-16",
+      "query": "미완성 색인이 활성 검색 결과에 섞이지 않게 하는 방법",
+      "relevance": {
+        "snapshot": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-17",
+      "query": "generated projection heading versus original evidence",
+      "relevance": {
+        "source-map": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-18",
+      "query": "리랭킹 질의가 디스크 캐시에 남지 않는 운용",
+      "relevance": {
+        "privacy": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-19",
+      "query": "ECDH 이후 HKDF Extract Expand를 수행하는 목적",
+      "relevance": {
+        "kdf": 2,
+        "ecdh": 2
+      },
+      "split": "tuning"
+    },
+    {
+      "id": "dev-20",
+      "query": "인코딩 해시 서명 인증서 권한을 구분해서 읽기",
+      "relevance": {
+        "encoding": 2,
+        "hashing": 2,
+        "ecdsa": 2,
+        "pki": 2,
+        "permissions": 2
+      },
+      "split": "tuning"
+    }
+  ]
+}

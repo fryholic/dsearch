@@ -1,2 +1,35 @@
-// Workspace boundary for packages/engine-qmd. Runtime implementation is pending.
-export {};
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { EngineProcess, loadEngineArtifact, verifyModel } from "@dsearch/runtime";
+import { DsearchError, type SearchRequest } from "@dsearch/contracts";
+
+export type ModelFile = { role: "embed" | "rerank" | "reference"; filename: string; bytes: number; sha256: string };
+export type OpenEngine = {
+  engineRoot: string; dbPath: string; collectionPath: string; modelRoot: string;
+  embedRole: "embed" | "reference"; strict: boolean;
+};
+export class QmdWorker {
+  readonly process = new EngineProcess(new URL("./worker.js", import.meta.url), { env: { QMD_EMBED_PARALLELISM: "1" } });
+  private opened = false;
+  async open(options: OpenEngine): Promise<unknown> {
+    await loadEngineArtifact(options.engineRoot, join(options.engineRoot, "dsearch-artifact.json"));
+    const registry = JSON.parse(await readFile(new URL("../../../vendor/models/registry.json", import.meta.url), "utf8")) as { models: ModelFile[] };
+    const embed = registry.models.find(m => m.role === options.embedRole);
+    const rerank = registry.models.find(m => m.role === "rerank");
+    if (!embed || !rerank) throw new DsearchError("COMPATIBILITY_FAILED");
+    for (const model of [embed, rerank]) await verifyModel(join(options.modelRoot, model.filename), model);
+    const result = await this.process.invoke({ method: "open", ...options,
+      embedModel: join(options.modelRoot, embed.filename), rerankModel: join(options.modelRoot, rerank.filename) });
+    this.opened = true; return result;
+  }
+  invoke<T>(method: string, args: unknown = {}, options: Parameters<EngineProcess["invoke"]>[1] = {}): Promise<T> {
+    return this.process.invoke<T>({ method, args }, options);
+  }
+  search(request: SearchRequest, options: Parameters<EngineProcess["invoke"]>[1] = {}): Promise<unknown> {
+    return this.invoke("search", request, options);
+  }
+  async close(): Promise<void> {
+    try { if (this.opened && this.process.state === "idle") await this.invoke("close", {}, { timeoutMs: 5000 }); }
+    finally { this.opened = false; await this.process.close(); }
+  }
+}

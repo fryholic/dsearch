@@ -2,7 +2,7 @@
 
 QMD를 검색 엔진으로 사용하는 로컬 문서 검색 프로젝트입니다. CLI·독립 웹 GUI·MCP가 같은 검색 계약을 사용하도록 구성합니다.
 
-현재 저장소에는 **디렉터리 골격, 공통 UI 토큰과 개발 보조 명령**이 있습니다. QMD 통합·실제 검색 API·제품 GUI는 아직 구현하지 않았습니다.
+현재 P0 실행 기반과 P1 QMD 적합성 검증 경로를 구현했습니다. TypeScript 빌드, 공통 런타임 스키마, 독립 native worker, 원문 매핑 프로토타입, 고정 QMD 호환 패치와 합성 자료 비교 시험이 있습니다. 대상은 macOS arm64입니다. 제품용 카탈로그·검색/읽기 HTTP API·전체 CLI·MCP·C안 GUI는 이후 단계에서 연결합니다.
 
 ## 시작
 
@@ -13,6 +13,21 @@ pnpm local:setup
 pnpm install --ignore-scripts
 pnpm check
 ~~~
+
+## 엔진 검증
+
+모델을 사용하는 첫 준비는 네트워크와 디스크 공간이 필요합니다. 고정 QMD 소스·lockfile·명시적으로 허용한 native 의존성을 준비하고, registry에 기록된 세 모델 약 1.61 GB를 받아 SHA-256과 크기를 확인합니다.
+
+~~~sh
+pnpm r0:prepare
+pnpm r0:verify
+~~~
+
+`r0:verify`는 준비된 로컬 파일만 사용해 빌드·단위/통합·개발 서버 보안·native 계약 시험과 4개 엔진/표현/모델 조합의 240회 합성 검색을 실행합니다. 결과는 Git에서 제외한 `artifacts/r0/`에 생성됩니다. `verification.json`의 `passed`는 해당 소스 fingerprint의 P0/P1 엔진 검증 완료를 뜻합니다. R1의 실제 문서 품질·설치·장시간 성능 검증은 별도 단계입니다.
+
+개별 명령은 `pnpm test:r0`, `pnpm r0:inspect`, `pnpm r0:benchmark`입니다. 명시적인 준비 이후 검색 도중 모델을 내려받지 않습니다. 선택적인 deep 확장 모델은 설치하지 않았으며, 없으면 오류를 반환합니다. 기본 질의 캐시는 bounded TTL 메모리를 사용합니다. SQLite WAL을 포함하는 일관된 snapshot 경로도 시험합니다.
+
+웹 빌드의 `dist-web/`는 React 진입점과 C 세이지 토큰을 검증하는 기본 화면입니다. 실제 검색 화면은 P2/P3에서 구현합니다. 현재 CLI와 웹의 공통 DTO 소비 시험은 fixture adapter를 사용합니다.
 
 ## 구조
 

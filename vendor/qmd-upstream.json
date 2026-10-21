@@ -3,12 +3,13 @@
   "sourceVersion": "2.8.3",
   "commit": "86d2365d17fc682e491c2c53d1e4a884aee8682a",
   "license": "MIT",
-  "integrationStatus": "planned",
+  "integrationStatus": "r0-implemented",
   "requiredCompatibilityPatches": [
     "EP-01",
     "EP-02",
     "EP-03",
     "EP-04"
   ],
-  "engineArtifactSha256": null
+  "engineArtifactSha256": "252837510d41353035ea91fbc264513119f32ea9eca154e4a157bcdb50a767af",
+  "patchSha256": "c7aca13ad6e4d2e2a2d58594f883b331308199f956d11b11e951abd6741e0606"
 }

@@ -21,5 +21,10 @@ for(const [kind,items] of Object.entries(expected)) {
 }
 const upstream=JSON.parse(readFileSync(resolve(root,"vendor/qmd-upstream.json"),"utf8"));
 assert.match(upstream.commit,/^[a-f0-9]{40}$/);
-assert.equal(upstream.integrationStatus,"planned");
-console.log("Workspace structure passed: 5 apps, 9 packages, planned QMD integration.");
+assert.ok(["planned","r0-implemented"].includes(upstream.integrationStatus));
+if(upstream.integrationStatus==="r0-implemented") {
+  assert.match(upstream.engineArtifactSha256,/^[a-f0-9]{64}$/);
+  assert.match(upstream.patchSha256,/^[a-f0-9]{64}$/);
+  assert.ok(existsSync(resolve(root,"vendor/qmd-patches/compat-v1.patch")));
+}
+console.log(`Workspace structure passed: 5 apps, 9 packages, QMD ${upstream.integrationStatus}.`);
