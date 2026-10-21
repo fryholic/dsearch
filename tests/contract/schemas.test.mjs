@@ -32,3 +32,5 @@ test('a complete profile requires resolved engine and model identities plus an e
  assert.deepEqual(ProfileManifest.parse(profile),profile);
  for(const v of [{...profile,engine:{...profile.engine,patch_digest:'UNRESOLVED'}},{...profile,models:{...profile.models,embed:artifact}},{...profile,models:{...profile.models,embed:{...profile.models.embed,sha256:'UNRESOLVED'}}}])assert.equal(ProfileManifest.safeParse(v).success,false);
 });
+
+test('error reasons disclose only bounded model-stage codes, never native messages or file paths',()=>{const packet={schema_version:1,request_id:'error-reason',ok:false,error:{code:'RERANK_UNAVAILABLE',reason:'RERANK_MODEL_NOT_INSTALLED',message:'RERANK_UNAVAILABLE',retryable:false}};assert.ok(ErrorEnvelope.safeParse(packet).success);assert.equal(ErrorEnvelope.safeParse({...packet,error:{...packet.error,reason:'/private/model/path'}}).success,false);});

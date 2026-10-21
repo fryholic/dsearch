@@ -1,7 +1,7 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { DsearchError, ErrorCode } from "@dsearch/contracts";
+import { DsearchError, ErrorCode, ErrorReason } from "@dsearch/contracts";
 export { fileDigest, verifyModel, engineArtifact, loadEngineArtifact } from "./artifacts.js";
 
 export type WorkerState = "idle" | "running" | "cancel_requested" | "stopped";
@@ -95,7 +95,7 @@ export class EngineProcess {
     if (record.ok === true) pending.finish(undefined, record.value);
     else {
       const parsed = ErrorCode.safeParse(record.code);
-      pending.finish(Object.assign(new DsearchError(parsed.success ? parsed.data : "INTERNAL_ERROR"), { telemetry }));
+      pending.finish(Object.assign(new DsearchError(parsed.success ? parsed.data : "INTERNAL_ERROR", undefined, false, ErrorReason.safeParse(record.reason).success ? ErrorReason.parse(record.reason) : undefined), { telemetry }));
     }
   }
   close(): Promise<void> {

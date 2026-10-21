@@ -2,7 +2,7 @@ import { terminalText } from './terminal.js';
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { DsearchError, ErrorCode, CollectionRequest, SearchRequest, LiteralRequest, ReadRequest, RelatedRequest, CompareRequest } from '@dsearch/contracts';
+import { DsearchError, ErrorCode, ErrorReason, CollectionRequest, SearchRequest, LiteralRequest, ReadRequest, RelatedRequest, CompareRequest } from '@dsearch/contracts';
 import { SearchStatus } from '@dsearch/contracts/search';
 import { connect, startDaemon, waitForStopped, openUI, defaultRoot, type Packet } from './connection.js';
 const help = `dsearch 0.1 alpha · QMD 2.8.3
@@ -97,7 +97,7 @@ try {
                 if (['completed', 'succeeded'].includes(state.state))
                     return packet;
                 if (['cancelled', 'failed', 'obsolete'].includes(state.state))
-                    throw new DsearchError(state.state === 'cancelled' ? 'CANCELLED' : ErrorCode.safeParse(state.error?.code ?? state.error_code).success ? (state.error?.code ?? state.error_code) : 'INTERNAL_ERROR');
+                    throw new DsearchError(state.state === 'cancelled' ? 'CANCELLED' : ErrorCode.safeParse(state.error?.code ?? state.error_code).success ? (state.error?.code ?? state.error_code) : 'INTERNAL_ERROR', undefined, false, ErrorReason.safeParse(state.error?.reason).success ? state.error.reason : undefined);
                 if (cancelled && state.state !== 'cancel_requested')
                     await call('DELETE', path);
                 await new Promise(r => setTimeout(r, 100));
@@ -195,8 +195,8 @@ try {
 catch (error) {
     const code = error instanceof DsearchError ? error.code : error && typeof error === 'object' && 'code' in error && String(error.code).startsWith('ERR_PARSE_ARGS') ? 'INVALID_REQUEST' : error instanceof TypeError || error instanceof SyntaxError ? 'INVALID_REQUEST' : 'INTERNAL_ERROR';
     if (jsonOutput)
-        process.stdout.write(JSON.stringify({ schema_version: 1, request_id: randomUUID(), ok: false, error: { code, message: code, retryable: ['BUSY', 'SERVICE_UNAVAILABLE'].includes(code) } }) + '\n');
+        process.stdout.write(JSON.stringify({ schema_version: 1, request_id: randomUUID(), ok: false, error: { ...(error instanceof DsearchError && error.reason ? { reason: error.reason } : {}), code, message: code, retryable: ['BUSY', 'SERVICE_UNAVAILABLE'].includes(code) } }) + '\n');
     else
-        process.stderr.write(code + '\n');
+        process.stderr.write(code + (error instanceof DsearchError && error.reason ? ' · ' + error.reason : '') + '\n');
     process.exitCode = exitCode(code);
 }

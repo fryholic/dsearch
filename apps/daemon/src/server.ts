@@ -280,7 +280,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
             const task = route(req, res, id).catch(error => { const code = error instanceof DsearchError ? error.code : 'INTERNAL_ERROR'; if (res.destroyed || res.writableEnded)
                 return; if (code === 'INPUT_TOO_LARGE' && !res.headersSent)
                 res.setHeader('Connection', 'close'); if (!res.headersSent)
-                json(res, statuses[code] ?? 500, { schema_version: 1, request_id: id, ok: false, error: { code, message: code, retryable: ['BUSY', 'SERVICE_UNAVAILABLE', 'SOURCE_PENDING'].includes(code) } });
+                json(res, statuses[code] ?? 500, { schema_version: 1, request_id: id, ok: false, error: { ...(error instanceof DsearchError && error.reason ? { reason: error.reason } : {}), code, message: code, retryable: ['BUSY', 'SERVICE_UNAVAILABLE', 'SOURCE_PENDING'].includes(code) } });
             else
                 res.end(); });
             inflight.add(task);

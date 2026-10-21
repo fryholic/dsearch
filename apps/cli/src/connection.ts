@@ -57,7 +57,7 @@ export async function connect(dataRoot: string) {
             throw new DsearchError('UNSUPPORTED_VERSION');
         const error = ErrorEnvelope.safeParse(packet);
         if (error.success)
-            throw new DsearchError(error.data.error.code);
+            throw new DsearchError(error.data.error.code, undefined, false, error.data.error.reason);
         if (!response.ok || packet.ok !== true || typeof packet.request_id !== 'string' || !('data' in packet))
             throw new DsearchError('COMPATIBILITY_FAILED');
         return packet;

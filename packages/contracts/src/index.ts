@@ -91,14 +91,17 @@ export type CollectionRequest = z.infer<typeof CollectionRequest>;
 export const JobState = z.enum(["queued", "running", "succeeded", "obsolete", "retry_wait", "failed", "cancel_requested", "cancelled"]);
 export const ErrorCode = z.enum(["INVALID_REQUEST", "UNSUPPORTED_VERSION", "COMPATIBILITY_FAILED", "MODEL_NOT_INSTALLED", "MODEL_UNAVAILABLE", "INPUT_TOO_LONG", "RERANK_UNAVAILABLE", "CANCELLED", "WORKER_EXITED", "BUSY", "STALE_REVISION", "INVALID_LOCATOR", "UNSUPPORTED_LOCATOR", "SCOPE_DENIED", "INTERNAL_ERROR", "NOT_FOUND", "SCOPE_INCOMPLETE", "UNSUPPORTED_ENCODING", "INVALID_METADATA", "SOURCE_PENDING", "STALE_EPOCH", "SOURCE_MAP_MISMATCH", "SOURCE_TOO_LARGE", "UNAUTHORIZED", "NO_ACTIVE_GENERATION", "RESULT_EXPIRED", "INVALID_QUERY", "SERVICE_UNAVAILABLE", "INPUT_TOO_LARGE"]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
+export const ErrorReason = z.enum(['EMBED_MODEL_NOT_INSTALLED', 'EMBED_MODEL_UNAVAILABLE', 'RERANK_MODEL_NOT_INSTALLED', 'RERANK_MODEL_UNAVAILABLE', 'RERANK_EXECUTION_FAILED', 'EXPANSION_MODEL_NOT_INSTALLED']);
+export type ErrorReason = z.infer<typeof ErrorReason>;
 export class DsearchError extends Error {
-  constructor(public readonly code: ErrorCode, message: string = code, public readonly retryable = false) {
-    super(message); this.name = "DsearchError";
+  readonly reason?: ErrorReason;
+  constructor(public readonly code: ErrorCode, message: string = code, public readonly retryable = false, reason?: ErrorReason) {
+    super(message);if (reason !== undefined) this.reason = reason; this.name = "DsearchError";
   }
 }
 export const ErrorEnvelope = z.strictObject({
   schema_version: z.literal(API_VERSION), request_id: Identifier, ok: z.literal(false),
-  error: z.strictObject({ code: ErrorCode, message: z.string().max(512), retryable: z.boolean() }),
+  error: z.strictObject({ reason: ErrorReason.optional(), code: ErrorCode, message: z.string().max(512), retryable: z.boolean() }),
 });
 export const successEnvelope = <T extends z.ZodType>(data: T) => z.strictObject({
   schema_version: z.literal(API_VERSION), request_id: Identifier, ok: z.literal(true), data,

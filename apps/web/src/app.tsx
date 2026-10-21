@@ -106,7 +106,7 @@ export function App() {
                 else if (parsed.state === 'failed' || parsed.state === 'cancelled') {
                     events.close();
                     if (parsed.state === 'failed')
-                        setError(message(new DsearchError(parsed.error?.code ?? 'INTERNAL_ERROR')));
+                        setError(message(new DsearchError(parsed.error?.code ?? 'INTERNAL_ERROR', undefined, false, parsed.error?.reason)));
                 }
             };
             events.addEventListener('state', event => { try {

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Identifier, Digest, Locator, Mode, RankStage, ErrorCode, DocumentRef } from './index.js';
+import { Identifier, Digest, Locator, Mode, RankStage, ErrorCode, ErrorReason, DocumentRef } from './index.js';
 export const Evidence = z.strictObject({ match_type: z.enum(['lexical', 'semantic']).default('lexical'), passage_id: Digest, heading_path: z.array(z.string().max(512)).max(128), locator: Locator, excerpt: z.string().max(1600), excerpt_truncated: z.boolean() });
 export const SearchDocument = z.strictObject({ score: z.number().finite(), doc_id: z.uuid(), revision_id: Identifier, title: z.string().max(512), collection_id: z.uuid(), relative_path: z.string().max(4096), freshness: z.literal('verified_at_read'), evidence: z.array(Evidence).min(1).max(2) });
 export type SearchDocument = z.infer<typeof SearchDocument>;
@@ -12,5 +12,5 @@ export const CompareComplete = z.strictObject({ search_id: Identifier, state: z.
 export type CompareComplete = z.infer<typeof CompareComplete>;
 export const SearchComplete = z.union([KeywordComplete, LiteralComplete, CompareComplete]);
 export type SearchComplete = z.infer<typeof SearchComplete>;
-export const SearchStatus = z.union([SearchComplete, z.strictObject({ search_id: Identifier, state: z.enum(['queued', 'running', 'cancel_requested', 'cancelled', 'failed']), phase: z.string().max(64), completed: z.number().int().nonnegative().optional(), error: z.strictObject({ code: ErrorCode, message: z.string().max(512), retryable: z.boolean() }).optional() })]);
+export const SearchStatus = z.union([SearchComplete, z.strictObject({ search_id: Identifier, state: z.enum(['queued', 'running', 'cancel_requested', 'cancelled', 'failed']), phase: z.string().max(64), completed: z.number().int().nonnegative().optional(), error: z.strictObject({ reason: ErrorReason.optional(), code: ErrorCode, message: z.string().max(512), retryable: z.boolean() }).optional() })]);
 export type SearchStatus = z.infer<typeof SearchStatus>;

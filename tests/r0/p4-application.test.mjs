@@ -67,10 +67,10 @@ test('P4 actual product hybrid, rerank, supplemental evidence, related/compare, 
   });
   await t.test('missing/corrupt models do not prevent lexical use; allowed fallback is explicit and staged',async()=>{
    await app.sessions.readers.unloadExcept();const reranker=registry.find(m=>m.role==='rerank'),embedder=registry.find(m=>m.role==='embed');await rm(join(models,reranker.filename));
-   const denied=await search({...base,rerank:true});assert.equal(denied.state,'failed');assert.equal(denied.error.code,'RERANK_UNAVAILABLE');
+   const denied=await search({...base,rerank:true});assert.equal(denied.state,'failed');assert.equal(denied.error.code,'RERANK_UNAVAILABLE');assert.equal(denied.error.reason,'RERANK_MODEL_NOT_INSTALLED');
    const fallback=await search({...base,rerank:true,allow_degraded:true});assert.equal(fallback.rank_stage,'qmd_rrf');assert.equal(fallback.degraded,true);assert.ok(fallback.warnings.includes('RERANK_MODEL_NOT_INSTALLED'));assert.equal(fallback.counts.reranked_passages,0);
    await app.sessions.readers.unloadExcept();await rm(join(models,embedder.filename));await writeFile(join(models,embedder.filename),'bad model bytes');
-   const corrupted=await search(base);assert.equal(corrupted.state,'failed');assert.equal(corrupted.error.code,'MODEL_UNAVAILABLE');
+   const corrupted=await search(base);assert.equal(corrupted.state,'failed');assert.equal(corrupted.error.code,'MODEL_UNAVAILABLE');assert.equal(corrupted.error.reason,'EMBED_MODEL_UNAVAILABLE');
    const lexical=await search({...base,query:'shared',rerank:true,allow_degraded:true});assert.equal(lexical.state,'completed',JSON.stringify(lexical));assert.equal(lexical.effective_mode,'lexical');assert.equal(lexical.rank_stage,'bm25');assert.equal(lexical.degraded,true);assert.ok(lexical.warnings.includes('MODEL_UNAVAILABLE'));assert.equal(lexical.counts.reranked_passages,0);
   });
   const generation=app.sessions.readers.active();for(const file of ['state.sqlite','state.sqlite-wal','generations/'+generation.generation_id+'/qmd.sqlite']){try{const bytes=await readFile(join(app.root,file));assert.equal(bytes.includes(Buffer.from('private-query-sentinel-p4-cancel')),false);}catch(e){if(e.code!=='ENOENT')throw e;}}

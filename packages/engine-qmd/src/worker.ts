@@ -1,6 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import { EngineSearchRequest, DsearchError, ErrorCode, type Filter } from "@dsearch/contracts";
+import { EngineSearchRequest, DsearchError, ErrorCode, ErrorReason, type Filter } from "@dsearch/contracts";
 
 type Stats = Record<string, number | boolean>;
 type Hit = { file: string; title: string; body?: string; bestChunk?: string; bestChunkPos?: number; score: number; [key: string]: unknown };
@@ -160,9 +160,9 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
         const line = request.query.replace(/\s+/g, " "), lexical = request.lexical_query ?? line;
         const search = async (mode: string, rerank: boolean) => {
           // Expansion is absent from this validated profile. Never invoke an implicit downloader.
-          if (mode === 'deep') throw Object.assign(new DsearchError('MODEL_NOT_INSTALLED'), { reason: 'EXPANSION_MODEL_NOT_INSTALLED' });
-          if (mode !== 'lexical' && modelErrors.embed) throw new DsearchError(modelErrors.embed === 'MODEL_NOT_INSTALLED' ? 'MODEL_NOT_INSTALLED' : 'MODEL_UNAVAILABLE');
-          if (rerank && modelErrors.rerank) throw Object.assign(new DsearchError('RERANK_UNAVAILABLE'), { reason: modelErrors.rerank === 'MODEL_NOT_INSTALLED' ? 'RERANK_MODEL_NOT_INSTALLED' : 'RERANK_MODEL_UNAVAILABLE' });
+          if (mode === 'deep') throw new DsearchError('MODEL_NOT_INSTALLED', undefined, false, 'EXPANSION_MODEL_NOT_INSTALLED');
+          if (mode !== 'lexical' && modelErrors.embed) throw new DsearchError(modelErrors.embed === 'MODEL_NOT_INSTALLED' ? 'MODEL_NOT_INSTALLED' : 'MODEL_UNAVAILABLE', undefined, false, modelErrors.embed === 'MODEL_NOT_INSTALLED' ? 'EMBED_MODEL_NOT_INSTALLED' : 'EMBED_MODEL_UNAVAILABLE');
+          if (rerank && modelErrors.rerank) throw new DsearchError('RERANK_UNAVAILABLE', undefined, false, modelErrors.rerank === 'MODEL_NOT_INSTALLED' ? 'RERANK_MODEL_NOT_INSTALLED' : 'RERANK_MODEL_UNAVAILABLE');
           const values = mode === "lexical"
           ? await current.searchLex(lexical, { collection: request.collections, limit: request.limit, filter })
           : await current.search({ ...(mode === "deep" ? { query: line } : { queries: [{ type: "lex", query: lexical }, { type: "vec", query: line }] }),
@@ -191,7 +191,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
             if (!request.allow_degraded || mode === 'lexical' || signal.aborted) throw error;
             const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
             if (!['RERANK_UNAVAILABLE', 'MODEL_NOT_INSTALLED', 'MODEL_UNAVAILABLE'].includes(code)) throw error;
-            warnings.push(error && typeof error === 'object' && 'reason' in error ? String(error.reason) : code);
+            warnings.push(code);if (error && typeof error === 'object' && 'reason' in error && ErrorReason.safeParse(error.reason).success) warnings.push(String(error.reason));
             stats.fallbackUsed = true;
             if (mode === 'deep') mode = 'hybrid';
             else if (code === 'RERANK_UNAVAILABLE') rerank = false;
@@ -223,6 +223,6 @@ process.on("message", message => {
   }).catch(error => {
     const parsed = ErrorCode.safeParse(error?.code);
     const code = controller.signal.aborted ? "CANCELLED" : parsed.success ? parsed.data : error?.name === "ZodError" ? "INVALID_REQUEST" : "MODEL_UNAVAILABLE";
-    send({ version: 1, id, type: "response", ok: false, code, telemetry: requestStats });
+    send({ version: 1, id, type: "response", ok: false, code, reason: ErrorReason.safeParse(error?.reason).success ? error.reason : code === "RERANK_UNAVAILABLE" ? "RERANK_EXECUTION_FAILED" : undefined, telemetry: requestStats });
   }).finally(() => { active = undefined; });
 });

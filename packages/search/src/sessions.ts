@@ -1,6 +1,6 @@
 import { HeavyLane } from '@dsearch/runtime';
 import { randomUUID } from 'node:crypto';
-import { DsearchError, ErrorCode, SearchRequest, RelatedRequest, CompareRequest, LiteralRequest } from '@dsearch/contracts';
+import { DsearchError, ErrorCode, ErrorReason, SearchRequest, RelatedRequest, CompareRequest, LiteralRequest } from '@dsearch/contracts';
 import { SearchStatus, type SearchComplete } from '@dsearch/contracts/search';
 import type { ReaderPool, ReadLease } from './readers.js';
 import type { SourceSearch } from './source-search.js';
@@ -97,7 +97,7 @@ export class SearchSessions {
             }
             catch (e) {
                 const candidate = e && typeof e === 'object' && 'code' in e ? ErrorCode.safeParse(e.code) : undefined, code = session.controller.signal.aborted ? 'CANCELLED' : candidate?.success ? candidate.data : 'INTERNAL_ERROR';
-                this.update(session, code === 'CANCELLED' ? { search_id: id, state: 'cancelled', phase: 'cancelled' } : { search_id: id, state: 'failed', phase: 'failed', error: { code, message: code, retryable: ['BUSY', 'SERVICE_UNAVAILABLE', 'SOURCE_PENDING'].includes(code) } });
+                this.update(session, code === 'CANCELLED' ? { search_id: id, state: 'cancelled', phase: 'cancelled' } : { search_id: id, state: 'failed', phase: 'failed', error: { ...(ErrorReason.safeParse(e && typeof e === 'object' && 'reason' in e ? e.reason : undefined).success ? { reason: (e as DsearchError).reason } : {}), code, message: code, retryable: ['BUSY', 'SERVICE_UNAVAILABLE', 'SOURCE_PENDING'].includes(code) } });
             }
             finally {
                 session.running = false;
