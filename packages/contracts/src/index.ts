@@ -75,8 +75,9 @@ export const CollectionRequest = z.strictObject({
   include: z.array(z.string().max(512)).max(32).default(["**/*.md", "**/*.markdown"]),
   exclude: z.array(z.string().max(512)).max(64).default([]),
 });
+export type CollectionRequest = z.infer<typeof CollectionRequest>;
 export const JobState = z.enum(["queued", "running", "succeeded", "obsolete", "retry_wait", "failed", "cancel_requested", "cancelled"]);
-export const ErrorCode = z.enum(["INVALID_REQUEST", "UNSUPPORTED_VERSION", "COMPATIBILITY_FAILED", "MODEL_NOT_INSTALLED", "MODEL_UNAVAILABLE", "INPUT_TOO_LONG", "RERANK_UNAVAILABLE", "CANCELLED", "WORKER_EXITED", "BUSY", "STALE_REVISION", "INVALID_LOCATOR", "UNSUPPORTED_LOCATOR", "SCOPE_DENIED", "INTERNAL_ERROR"]);
+export const ErrorCode = z.enum(["INVALID_REQUEST", "UNSUPPORTED_VERSION", "COMPATIBILITY_FAILED", "MODEL_NOT_INSTALLED", "MODEL_UNAVAILABLE", "INPUT_TOO_LONG", "RERANK_UNAVAILABLE", "CANCELLED", "WORKER_EXITED", "BUSY", "STALE_REVISION", "INVALID_LOCATOR", "UNSUPPORTED_LOCATOR", "SCOPE_DENIED", "INTERNAL_ERROR", "NOT_FOUND", "SCOPE_INCOMPLETE", "UNSUPPORTED_ENCODING", "INVALID_METADATA", "SOURCE_PENDING", "STALE_EPOCH", "SOURCE_MAP_MISMATCH", "SOURCE_TOO_LARGE"]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 export class DsearchError extends Error {
   constructor(public readonly code: ErrorCode, message: string = code, public readonly retryable = false) {
@@ -106,3 +107,10 @@ export const ProfileManifest = z.strictObject({
     heavy_concurrency: z.literal(1), embed_parallelism: z.literal(1), idle_worker_shutdown_seconds: z.literal(300) }),
 });
 export type ProfileManifest = z.infer<typeof ProfileManifest>;
+const GenerationFile = z.strictObject({ path: z.string().min(1).max(512).regex(/^[A-Za-z0-9_.\/-]+$/).refine(p => !p.startsWith("/") && p.split("/").every(x => x !== "" && x !== "." && x !== "..")), bytes: z.number().int().nonnegative(), sha256: Digest });
+export const GenerationManifest = z.strictObject({
+  schema_version: z.literal(1), generation_id: Identifier, profile_fp: Digest, source_seq: z.number().int().nonnegative(),
+  scopes: z.record(z.uuid(), Digest), files: z.array(GenerationFile).min(1).max(250_000).refine(values => new Set(values.map(v => v.path)).size === values.length),
+  documents: z.number().int().nonnegative(), passages: z.number().int().nonnegative(), created_at: z.iso.datetime(),
+});
+export type GenerationManifest = z.infer<typeof GenerationManifest>;

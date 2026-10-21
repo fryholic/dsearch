@@ -10,5 +10,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@dsearch/contracts": "workspace:*",
+    "@dsearch/compiler": "workspace:*",
+    "yaml": "2.9.0"
   }
 }

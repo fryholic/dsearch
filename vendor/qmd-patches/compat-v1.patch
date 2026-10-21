@@ -1,9 +1,35 @@
+diff --git a/src/db.ts b/src/db.ts
+index de23218..f09770c 100644
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -16,7 +16,7 @@ export const isBun = "Bun" in globalThis;
+ export type SQLiteValue = string | number | bigint | Buffer | Uint8Array | Float32Array | null;
+ export type SQLiteParams = readonly SQLiteValue[];
+ 
+-type DatabaseConstructor = new (path: string) => Database;
++type DatabaseConstructor = new (path: string, options?: { readonly: boolean; fileMustExist: boolean }) => Database;
+ type LoadableSqliteDatabase = Pick<Database, "loadExtension">;
+ 
+ let _Database: DatabaseConstructor;
+@@ -113,8 +113,10 @@ function enableWal(db: Database, budgetMs: number): void {
+  * restores the upstream fail-fast behaviour). See
+  * https://bun.sh/docs/api/sqlite#busy-timeout.
+  */
+-export function openDatabase(path: string): Database {
+-  const db = new _Database(path) as Database;
++export function openDatabase(path: string, readOnly = false): Database {
++  if (readOnly && isBun) throw new Error("dsearch sealed-reader mode requires the pinned Node runtime");
++  const db = new _Database(path, readOnly ? { readonly: true, fileMustExist: true } : undefined) as Database;
++  if (readOnly) { db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=5000"); return db; }
+   const raw = process.env.QMD_SQLITE_BUSY_TIMEOUT;
+   const parsed = raw !== undefined && raw !== "" ? Number(raw) : Number.NaN;
+   const busyTimeoutMs = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 120_000;
 diff --git a/src/dsearch-compat.ts b/src/dsearch-compat.ts
 new file mode 100644
-index 0000000..c362a68
+index 0000000..734b151
 --- /dev/null
 +++ b/src/dsearch-compat.ts
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,63 @@
 +/** dsearch compatibility boundary, pinned to the upstream and runtime in the release manifest. */
 +import { AsyncLocalStorage } from "node:async_hooks";
 +import { setImmediate } from "node:timers/promises";
@@ -65,17 +91,19 @@ index 0000000..c362a68
 +export const dsearchCapabilities = Object.freeze({
 +  version: 1, "EP-01": true, "EP-02": true, "EP-03": true, "EP-04": true,
 +  runtime: "node-llama-cpp@3.20.0", cacheMode: "memory", strictNoTruncation: true,
++  sealedReadOnly: true,
 +});
 diff --git a/src/index.ts b/src/index.ts
-index 76bc2a6..f56fa81 100644
+index 76bc2a6..328064b 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
 +export { runDsearchRequest, MemoryQueryCache, compatibilityStats, dsearchCapabilities } from "./dsearch-compat.js";
++import { createHash } from "node:crypto";
  /**
   * QMD SDK - Library mode for programmatic access to QMD search and indexing.
   *
-@@ -18,6 +19,7 @@
+@@ -18,6 +20,7 @@
   */
  
  import {
@@ -83,7 +111,7 @@ index 76bc2a6..f56fa81 100644
    createStore as createStoreInternal,
    hybridQuery,
    structuredSearch,
-@@ -68,6 +70,8 @@ import {
+@@ -68,6 +71,8 @@ import {
  } from "./store.js";
  import {
    LlamaCpp,
@@ -92,7 +120,16 @@ index 76bc2a6..f56fa81 100644
  } from "./llm.js";
  import type {
    DocumentMetadata,
-@@ -305,6 +309,14 @@ export interface QMDStore {
+@@ -291,6 +296,8 @@ export interface StoreOptions {
+   configPath?: string;
+   /** Inline collection config (mutually exclusive with `configPath`) */
+   config?: CollectionConfig;
++  /** dsearch compatibility option: sealed Node reader; no migrations or config writes. */
++  dsearchReadOnly?: boolean;
+ }
+ 
+ /**
+@@ -305,6 +312,14 @@ export interface QMDStore {
    readonly internal: InternalStore;
    /** Path to the SQLite database */
    readonly dbPath: string;
@@ -107,7 +144,30 @@ index 76bc2a6..f56fa81 100644
  
    // ── Search ──────────────────────────────────────────────────────────
  
-@@ -484,6 +496,19 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+@@ -449,7 +464,8 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+   }
+ 
+   // Create the internal store (opens DB, creates tables)
+-  const internal = createStoreInternal(options.dbPath);
++  if (options.dsearchReadOnly && options.configPath) throw new Error("Sealed readers require inline verified config");
++  const internal = createStoreInternal(options.dbPath, { readOnly: options.dsearchReadOnly === true });
+   const db = internal.db;
+ 
+   // Track whether we have a YAML config path for write-through
+@@ -466,7 +482,11 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+     // Inline config mode: inject config source for mutations, sync to DB
+     setConfigSource({ config: options.config });
+     config = options.config;
+-    syncConfigToDb(db, config);
++    if (options.dsearchReadOnly) {
++      const expected = createHash("sha256").update(JSON.stringify(config)).digest("hex");
++      const saved = db.prepare("SELECT value FROM store_config WHERE key='config_hash'").get() as { value: string } | undefined;
++      if (saved?.value !== expected) { db.close(); throw new Error("Sealed reader config differs from generation"); }
++    } else syncConfigToDb(db, config);
+   }
+   // else: DB-only mode — no external config, use existing store_collections
+ 
+@@ -484,6 +504,19 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
    const store: QMDStore = {
      internal,
      dbPath: internal.dbPath,
@@ -383,7 +443,7 @@ index 2b943a5..15c4812 100644
      // Prevent double-dispose
      if (this.disposed) {
 diff --git a/src/store.ts b/src/store.ts
-index 4b3b0f6..ca2a51a 100644
+index 4b3b0f6..e3deb38 100644
 --- a/src/store.ts
 +++ b/src/store.ts
 @@ -1,3 +1,4 @@
@@ -391,7 +451,31 @@ index 4b3b0f6..ca2a51a 100644
  /**
   * QMD Store - Core data access and retrieval functions
   *
-@@ -2365,7 +2366,7 @@ export async function generateEmbeddings(
+@@ -1234,7 +1235,7 @@ function rebuildFTSForCjkNormalization(db: Database): void {
+   }
+ }
+ 
+-function initializeDatabase(db: Database): void {
++function initializeDatabase(db: Database, readOnly = false): void {
+   try {
+     loadSqliteVec(db);
+     verifySqliteVecLoaded(db);
+@@ -1247,6 +1248,14 @@ function initializeDatabase(db: Database): void {
+     console.warn(_sqliteVecUnavailableReason);
+   }
+   db.exec("PRAGMA foreign_keys = ON");
++  if (readOnly) {
++    // A sealed generation must already contain the current schema. Never migrate on read.
++    db.prepare("SELECT id, collection, path, hash FROM documents LIMIT 0").all();
++    db.prepare("SELECT hash, seq, embed_fingerprint FROM content_vectors LIMIT 0").all();
++    db.prepare("SELECT name, path FROM store_collections LIMIT 0").all();
++    db.prepare("SELECT key, value FROM store_config LIMIT 0").all();
++    return;
++  }
+ 
+   // Drop legacy tables that are now managed in YAML
+   db.exec(`DROP TABLE IF EXISTS path_contexts`);
+@@ -2365,7 +2374,7 @@ export async function generateEmbeddings(
      let bytesProcessed = 0;
      let totalChunks = 0;
      let vectorTableInitialized = false;
@@ -400,7 +484,7 @@ index 4b3b0f6..ca2a51a 100644
      const RETRY_AFTER_SUCCESSFUL_CHUNKS = 64;
      const MAX_RETRY_ATTEMPTS = 3;
      const failures = new Map<string, EmbedFailure>();
-@@ -2410,6 +2411,7 @@ export async function generateEmbeddings(
+@@ -2410,6 +2419,7 @@ export async function generateEmbeddings(
          clearFailure(chunk);
          return true;
        } catch (error) {
@@ -408,7 +492,7 @@ index 4b3b0f6..ca2a51a 100644
          recordFailure(chunk, reasonFromError(error));
          return false;
        }
-@@ -2440,6 +2442,7 @@ export async function generateEmbeddings(
+@@ -2440,6 +2450,7 @@ export async function generateEmbeddings(
      const batches = buildEmbeddingBatches(docsToEmbed, maxDocsPerBatch, maxBatchBytes);
  
      for (const batchMeta of batches) {
@@ -416,7 +500,7 @@ index 4b3b0f6..ca2a51a 100644
        // Abort early if session has been invalidated
        if (!session.isValid) {
          console.warn(`⚠ Session expired — skipping remaining document batches`);
-@@ -2552,6 +2555,7 @@ export async function generateEmbeddings(
+@@ -2552,6 +2563,7 @@ export async function generateEmbeddings(
            batchChunkBytesProcessed += chunkBatch.reduce((sum, chunk) => sum + chunk.bytes, 0);
            await retryFailedChunks();
          } catch (error) {
@@ -424,7 +508,21 @@ index 4b3b0f6..ca2a51a 100644
            // Batch failed — try individual embeddings as fallback. If an
            // individual retry succeeds, any prior failure for that chunk is
            // cleared, so the visible error count reflects outstanding failures.
-@@ -3120,11 +3124,15 @@ export function getCacheKey(url: string, body: CacheKeyBody): string {
+@@ -2612,10 +2624,10 @@ export async function generateEmbeddings(
+  * @param dbPath - Path to the SQLite database file
+  * @returns Store instance with all methods bound to the database
+  */
+-export function createStore(dbPath?: string): Store {
++export function createStore(dbPath?: string, options: { readOnly?: boolean } = {}): Store {
+   const resolvedPath = dbPath || getDefaultDbPath();
+-  const db = openDatabase(resolvedPath);
+-  initializeDatabase(db);
++  const db = openDatabase(resolvedPath, options.readOnly === true);
++  try { initializeDatabase(db, options.readOnly === true); } catch (error) { db.close(); throw error; }
+ 
+   const store: Store = {
+     db,
+@@ -3120,11 +3132,15 @@ export function getCacheKey(url: string, body: CacheKeyBody): string {
  }
  
  export function getCachedResult(db: Database, cacheKey: string): string | null {
@@ -440,7 +538,7 @@ index 4b3b0f6..ca2a51a 100644
    const now = new Date().toISOString();
    db.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
    if (Math.random() < 0.01) {
-@@ -5309,6 +5317,7 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
+@@ -5309,6 +5325,7 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
   */
  export function deleteExpansionCacheEntry(db: Database, query: string, model: string = DEFAULT_QUERY_MODEL): void {
    const cacheKey = getCacheKey("expandQuery", { query, model });
@@ -448,7 +546,7 @@ index 4b3b0f6..ca2a51a 100644
    db.prepare(`DELETE FROM llm_cache WHERE hash = ?`).run(cacheKey);
  }
  
-@@ -5317,6 +5326,7 @@ export function deleteExpansionCacheEntry(db: Database, query: string, model: st
+@@ -5317,6 +5334,7 @@ export function deleteExpansionCacheEntry(db: Database, query: string, model: st
  // =============================================================================
  
  export async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<{ file: string; score: number }[]> {
@@ -456,7 +554,7 @@ index 4b3b0f6..ca2a51a 100644
    // Prepend intent to rerank query so the reranker scores with domain context
    const rerankQuery = intent ? `${intent}\n\n${query}` : query;
    const llm = llmOverride ?? getDefaultLlamaCpp();
-@@ -5359,6 +5369,7 @@ export async function rerank(query: string, documents: { file: string; text: str
+@@ -5359,6 +5377,7 @@ export async function rerank(query: string, documents: { file: string; text: str
    }
  
    // Return all results sorted by score
@@ -464,7 +562,7 @@ index 4b3b0f6..ca2a51a 100644
    return documents
      .map(doc => ({ file: doc.file, score: cachedResults.get(doc.text) || 0 }))
      .sort((a, b) => b.score - a.score);
-@@ -6400,6 +6411,7 @@ export async function hybridQuery(
+@@ -6400,6 +6419,7 @@ export async function hybridQuery(
    const fused = reciprocalRankFusion(rankedLists, weights);
    const rrfTraceByFile = explain ? buildRrfTrace(rankedLists, weights, rankedListMeta) : null;
    const candidates = fused.slice(0, candidateLimit);
@@ -472,7 +570,7 @@ index 4b3b0f6..ca2a51a 100644
  
    if (candidates.length === 0) return [];
  
-@@ -6790,6 +6802,7 @@ export async function structuredSearch(
+@@ -6790,6 +6810,7 @@ export async function structuredSearch(
    const fused = reciprocalRankFusion(rankedLists, weights);
    const rrfTraceByFile = explain ? buildRrfTrace(rankedLists, weights, rankedListMeta) : null;
    const candidates = fused.slice(0, candidateLimit);
@@ -480,7 +578,7 @@ index 4b3b0f6..ca2a51a 100644
  
    if (candidates.length === 0) return [];
  
-@@ -6953,3 +6966,14 @@ export async function structuredSearch(
+@@ -6953,3 +6974,14 @@ export async function structuredSearch(
      .slice(0, limit);
    return attachResultMetadata(store.db, finalResults);
  }

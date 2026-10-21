@@ -3,6 +3,7 @@ import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+export { compileDocument, validateSourceMap, primaryIntersections, type CompiledDocument, type Passage, type MapSegment, type ProjectionCheck, type ProjectionInspector, type SourceSpan, type CoverageBlock } from "./production.js";
 
 type Node = { type: string; depth?: number; children?: Node[]; value?: string;
   position?: { start: { offset?: number }; end: { offset?: number } } };

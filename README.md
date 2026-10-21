@@ -2,7 +2,7 @@
 
 QMD를 검색 엔진으로 사용하는 로컬 문서 검색 프로젝트입니다. CLI·독립 웹 GUI·MCP가 같은 검색 계약을 사용하도록 구성합니다.
 
-현재 P0 실행 기반과 P1 QMD 적합성 검증 경로를 구현했습니다. TypeScript 빌드, 공통 런타임 스키마, 독립 native worker, 원문 매핑 프로토타입, 고정 QMD 호환 패치와 합성 자료 비교 시험이 있습니다. 대상은 macOS arm64입니다. 제품용 카탈로그·검색/읽기 HTTP API·전체 CLI·MCP·C안 GUI는 이후 단계에서 연결합니다.
+현재 P0/P1 실행 기반과 엔진 검증, P2의 영구 원문 카탈로그·생산용 구간 컴파일러·수동 세대 구축을 구현했습니다. 원문 revision과 범위 검사, 실제 tokenizer preflight, lexical 전용 구간, 봉인·무결성 검사·원자적 세대 게시와 읽기 전용 QMD reader를 시험합니다. 대상은 macOS arm64입니다. 검색/읽기 HTTP API·초기 CLI·C안 GUI 연결은 진행 중입니다. MCP와 전체 운영 기능은 후속 범위입니다.
 
 ## 시작
 

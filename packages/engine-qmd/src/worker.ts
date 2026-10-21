@@ -5,7 +5,7 @@ import { SearchRequest, DsearchError, ErrorCode } from "@dsearch/contracts";
 type Stats = Record<string, number | boolean>;
 type Hit = { file: string; title: string; body?: string; bestChunk?: string; bestChunkPos?: number; score: number; [key: string]: unknown };
 type Store = {
-  internal: { db: { prepare(sql: string): { get(): unknown } } };
+  internal: { db: { prepare(sql: string): { get(): unknown; all(): unknown[] } } };
   update(): Promise<unknown>; embed(options: unknown): Promise<unknown>;
   search(options: unknown): Promise<Hit[]>; searchLex(query: string, options: unknown): Promise<Hit[]>;
   close(): Promise<void>;
@@ -24,6 +24,7 @@ type Module = {
   runDsearchRequest<T>(request: unknown, operation: () => Promise<T>): Promise<T>;
 };
 let sdk: Module, store: Store | undefined, cache: unknown, strict = true, engineRoot = "";
+let role: "probe" | "builder" | "reader" = "probe", allowedCollections = ["probe"], semanticCollections = ["probe"];
 let active: { id: string; controller: AbortController } | undefined;
 let requestStats: Stats | undefined;
 const send = (message: unknown) => { if (process.connected) process.send?.(message); };
@@ -43,21 +44,37 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
     strict = payload.strict === true;
     if (strict && !["EP-01", "EP-02", "EP-03", "EP-04"].every(key => sdk.dsearchCapabilities?.[key] === true))
       throw new DsearchError("COMPATIBILITY_FAILED");
-    store = await sdk.createStore({ dbPath: string(payload.dbPath), config: {
-      collections: { probe: { path: string(payload.collectionPath), pattern: "**/*.md" } },
+    if (payload.role !== undefined && !["probe", "builder", "reader"].includes(String(payload.role))) throw new DsearchError("INVALID_REQUEST");
+    role = (payload.role ?? "probe") as typeof role;
+    if (role !== "probe" && (typeof payload.generationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(payload.generationId))) throw new DsearchError("INVALID_REQUEST");
+    if (role === "reader" && sdk.dsearchCapabilities?.sealedReadOnly !== true) throw new DsearchError("COMPATIBILITY_FAILED");
+    const collections = payload.collections ? object(payload.collections) : { probe: { path: string(payload.collectionPath), pattern: "**/*.md" } };
+    allowedCollections = Object.keys(collections);
+    if (!allowedCollections.length || allowedCollections.length > 64 || allowedCollections.some(key => !/^[a-zA-Z0-9_-]{1,128}$/.test(key))) throw new DsearchError("INVALID_REQUEST");
+    for (const value of Object.values(collections)) { const entry = object(value);string(entry.path);if (entry.pattern !== "**/*.md") throw new DsearchError("INVALID_REQUEST"); }
+    semanticCollections = Array.isArray(payload.semanticCollections) ? payload.semanticCollections.map(string) : [...allowedCollections];
+    if (semanticCollections.some(key => !allowedCollections.includes(key))) throw new DsearchError("INVALID_REQUEST");
+    try { store = await sdk.createStore({ dbPath: string(payload.dbPath), dsearchReadOnly: role === "reader", config: {
+      collections,
       models: { embed: string(payload.embedModel), rerank: string(payload.rerankModel), generate: join(root, "not-installed.gguf") },
-    } });
+    } }); } catch { throw new DsearchError("COMPATIBILITY_FAILED"); }
     if (strict) cache = new sdk.MemoryQueryCache();
     return { capabilities: sdk.dsearchCapabilities ?? null, strict };
   }
   if (!store) throw new DsearchError("COMPATIBILITY_FAILED");
   const args = object(payload.args ?? {}), current = store;
+  if (role === "reader" && ["update", "embed"].includes(method)) throw new DsearchError("SCOPE_DENIED");
   const stats = strict ? sdk.compatibilityStats() : {};
   requestStats = stats;
   const operation = async (): Promise<unknown> => {
     switch (method) {
       case "update": return current.update();
-      case "embed": return current.embed({ maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
+      case "embed": {
+        if (role === "probe") return current.embed({ maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
+        const results = [];
+        for (const collection of semanticCollections) results.push(await current.embed({ collection, maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" }));
+        return { results };
+      }
       case "inspect": return current.dsearchInspectProjection(string(args.text), string(args.title), string(args.file));
       case "inspect_rerank": return current.dsearchInspectRerank(string(args.query), string(args.text));
       case "query_tokens": return current.dsearchQueryTokens(string(args.query));
@@ -80,6 +97,11 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
       }
       case "device": return typeof current.dsearchDevice === "function" ? current.dsearchDevice()
         : (current.internal as unknown as { llm: { getDeviceInfo(options: unknown): Promise<unknown> } }).llm.getDeviceInfo({ allowBuild: false });
+      case "index_audit": {
+        const db = current.internal.db;
+        return { documents: db.prepare("SELECT d.collection,d.path,count(v.hash) AS vector_chunks FROM documents d LEFT JOIN content_vectors v ON v.hash=d.hash WHERE d.active=1 GROUP BY d.id ORDER BY d.collection,d.path").all(),
+          integrity: db.prepare("PRAGMA quick_check").get(), cache: db.prepare("SELECT count(*) AS rows FROM llm_cache").get() };
+      }
       case "clear_cache": if (strict) (cache as { clear(): void }).clear(); return { cleared: true };
       case "cache_audit": {
         if (!strict) throw new DsearchError("INVALID_REQUEST");
@@ -109,7 +131,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
       case "close": await current.close(); store = undefined; return { closed: true };
       case "search": {
         const request = SearchRequest.parse(args);
-        if (request.collections.some(id => id !== "probe")) throw new DsearchError("SCOPE_DENIED");
+        if (request.collections.some(id => !allowedCollections.includes(id))) throw new DsearchError("SCOPE_DENIED");
         if (request.filter) throw new DsearchError("INVALID_REQUEST", "Probe does not compile product metadata filters");
         const line = request.query.replace(/\s+/g, " ");
         const search = async (mode: string, rerank: boolean) => {

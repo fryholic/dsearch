@@ -10,5 +10,22 @@
   },
   "include": [
     "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../catalog"
+    },
+    {
+      "path": "../compiler"
+    },
+    {
+      "path": "../contracts"
+    },
+    {
+      "path": "../engine-qmd"
+    },
+    {
+      "path": "../runtime"
+    }
   ]
 }

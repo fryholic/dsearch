@@ -4,15 +4,24 @@ import { EngineProcess, loadEngineArtifact, verifyModel } from "@dsearch/runtime
 import { DsearchError, type SearchRequest } from "@dsearch/contracts";
 
 export type ModelFile = { role: "embed" | "rerank" | "reference"; filename: string; bytes: number; sha256: string };
+export type EngineResponse<T> = { result: T; stats: Record<string, number | boolean>; duration_ms: number; rss_bytes: number };
 export type OpenEngine = {
   engineRoot: string; dbPath: string; collectionPath: string; modelRoot: string;
   embedRole: "embed" | "reference"; strict: boolean;
+  role?: "probe" | "builder" | "reader"; generationId?: string;
+  collections?: Record<string, { path: string; pattern: string }>;
+  semanticCollections?: string[];
 };
 export class QmdWorker {
   readonly process = new EngineProcess(new URL("./worker.js", import.meta.url), { env: { QMD_EMBED_PARALLELISM: "1" } });
   private opened = false;
   async open(options: OpenEngine): Promise<unknown> {
     await loadEngineArtifact(options.engineRoot, join(options.engineRoot, "dsearch-artifact.json"));
+    if (options.strict) {
+      const expected = JSON.parse(await readFile(new URL("../../../vendor/qmd-upstream.json", import.meta.url), "utf8")) as { commit: string; engineArtifactSha256: string; patchSha256: string };
+      const actual = JSON.parse(await readFile(join(options.engineRoot, "dsearch-artifact.json"), "utf8")) as { upstream_commit: string; artifact_sha256: string; patch_digest: string };
+      if (actual.upstream_commit !== expected.commit || actual.artifact_sha256 !== expected.engineArtifactSha256 || actual.patch_digest !== expected.patchSha256) throw new DsearchError("COMPATIBILITY_FAILED");
+    }
     const registry = JSON.parse(await readFile(new URL("../../../vendor/models/registry.json", import.meta.url), "utf8")) as { models: ModelFile[] };
     const embed = registry.models.find(m => m.role === options.embedRole);
     const rerank = registry.models.find(m => m.role === "rerank");
