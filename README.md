@@ -304,7 +304,7 @@ vendor/           upstream manifest, 패치, 모델 registry, 라이선스
 
 ## License
 
-프로젝트 자체의 라이선스는 아직 지정되지 않았습니다.
+이 프로젝트는 [MIT License](LICENSE)로 배포합니다.
 
 QMD의 MIT 라이선스 고지는 [vendor/licenses/QMD-LICENSE](vendor/licenses/QMD-LICENSE)에 보관합니다. 그 밖의 의존성과 모델에는 각 배포본의 라이선스가 적용됩니다.
 
