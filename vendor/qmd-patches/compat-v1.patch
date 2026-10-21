@@ -26,10 +26,10 @@ index de23218..f09770c 100644
    const busyTimeoutMs = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 120_000;
 diff --git a/src/dsearch-compat.ts b/src/dsearch-compat.ts
 new file mode 100644
-index 0000000..734b151
+index 0000000..4cbebe1
 --- /dev/null
 +++ b/src/dsearch-compat.ts
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,64 @@
 +/** dsearch compatibility boundary, pinned to the upstream and runtime in the release manifest. */
 +import { AsyncLocalStorage } from "node:async_hooks";
 +import { setImmediate } from "node:timers/promises";
@@ -92,9 +92,10 @@ index 0000000..734b151
 +  version: 1, "EP-01": true, "EP-02": true, "EP-03": true, "EP-04": true,
 +  runtime: "node-llama-cpp@3.20.0", cacheMode: "memory", strictNoTruncation: true,
 +  sealedReadOnly: true,
++  lexicalEvidence: true,
 +});
 diff --git a/src/index.ts b/src/index.ts
-index 76bc2a6..328064b 100644
+index 76bc2a6..e2156da 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -1,3 +1,5 @@
@@ -103,15 +104,16 @@ index 76bc2a6..328064b 100644
  /**
   * QMD SDK - Library mode for programmatic access to QMD search and indexing.
   *
-@@ -18,6 +20,7 @@
+@@ -18,6 +20,8 @@
   */
  
  import {
 +  dsearchInspectProjection,
++  dsearchLexicalMatches,
    createStore as createStoreInternal,
    hybridQuery,
    structuredSearch,
-@@ -68,6 +71,8 @@ import {
+@@ -68,6 +72,8 @@ import {
  } from "./store.js";
  import {
    LlamaCpp,
@@ -120,7 +122,7 @@ index 76bc2a6..328064b 100644
  } from "./llm.js";
  import type {
    DocumentMetadata,
-@@ -291,6 +296,8 @@ export interface StoreOptions {
+@@ -291,6 +297,8 @@ export interface StoreOptions {
    configPath?: string;
    /** Inline collection config (mutually exclusive with `configPath`) */
    config?: CollectionConfig;
@@ -129,7 +131,7 @@ index 76bc2a6..328064b 100644
  }
  
  /**
-@@ -305,6 +312,14 @@ export interface QMDStore {
+@@ -305,6 +313,15 @@ export interface QMDStore {
    readonly internal: InternalStore;
    /** Path to the SQLite database */
    readonly dbPath: string;
@@ -140,11 +142,12 @@ index 76bc2a6..328064b 100644
 +  dsearchRerank(query: string, documents: { file: string; text: string }[]): Promise<{ file: string; score: number }[]>;
 +  dsearchDevice(): ReturnType<LlamaCpp["getDeviceInfo"]>;
 +  dsearchSnapshot(target: string): Promise<void>;
++  dsearchLexicalMatches(query: string, files: { file: string; primaryRanges: { start: number; end: number }[] }[]): Promise<{ file: string; projectionSha256: string; ranges: { start: number; end: number }[] }[]>;
 +
  
    // ── Search ──────────────────────────────────────────────────────────
  
-@@ -449,7 +464,8 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+@@ -449,7 +466,8 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
    }
  
    // Create the internal store (opens DB, creates tables)
@@ -154,7 +157,7 @@ index 76bc2a6..328064b 100644
    const db = internal.db;
  
    // Track whether we have a YAML config path for write-through
-@@ -466,7 +482,11 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+@@ -466,7 +484,11 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
      // Inline config mode: inject config source for mutations, sync to DB
      setConfigSource({ config: options.config });
      config = options.config;
@@ -167,7 +170,7 @@ index 76bc2a6..328064b 100644
    }
    // else: DB-only mode — no external config, use existing store_collections
  
-@@ -484,6 +504,19 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+@@ -484,6 +506,20 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
    const store: QMDStore = {
      internal,
      dbPath: internal.dbPath,
@@ -183,6 +186,7 @@ index 76bc2a6..328064b 100644
 +    dsearchRerank: (query, documents) => internal.rerank(query, documents),
 +    dsearchDevice: () => llm.getDeviceInfo({ allowBuild: false }),
 +    dsearchSnapshot: async target => { await (internal.db as unknown as { backup(path: string): Promise<unknown> }).backup(target); },
++    dsearchLexicalMatches: (query, files) => dsearchLexicalMatches(internal, query, files),
 +
  
      // Search
@@ -443,14 +447,23 @@ index 2b943a5..15c4812 100644
      // Prevent double-dispose
      if (this.disposed) {
 diff --git a/src/store.ts b/src/store.ts
-index 4b3b0f6..e3deb38 100644
+index 4b3b0f6..aa255a7 100644
 --- a/src/store.ts
 +++ b/src/store.ts
 @@ -1,3 +1,4 @@
-+import { currentCompatibility, compatibilityYield } from "./dsearch-compat.js";
++import { currentCompatibility, compatibilityYield, CompatibilityError } from "./dsearch-compat.js";
  /**
   * QMD Store - Core data access and retrieval functions
   *
+@@ -48,7 +49,7 @@ import {
+ } from "./store-migrations.js";
+ import type { Database, SQLiteValue } from "./db.js";
+ import picomatch from "picomatch";
+-import { createHash } from "crypto";
++import { createHash, randomUUID } from "crypto";
+ import { readFileSync, realpathSync, statSync, mkdirSync } from "node:fs";
+ // Note: node:path resolve is not imported — we export our own cross-platform resolve()
+ import fastGlob from "fast-glob";
 @@ -1234,7 +1235,7 @@ function rebuildFTSForCjkNormalization(db: Database): void {
    }
  }
@@ -578,7 +591,7 @@ index 4b3b0f6..e3deb38 100644
  
    if (candidates.length === 0) return [];
  
-@@ -6953,3 +6974,14 @@ export async function structuredSearch(
+@@ -6953,3 +6974,73 @@ export async function structuredSearch(
      .slice(0, limit);
    return attachResultMetadata(store.db, finalResults);
  }
@@ -592,4 +605,63 @@ index 4b3b0f6..e3deb38 100644
 +  const search = await chunkDocumentAsync(text, undefined, undefined, undefined, file, "regex");
 +  return { actualTitle, embeddingTokens, embeddingChunks: embedding.length, searchChunks: search.length,
 +    safe: text.length <= 2400 && embeddingTokens <= 800 && embedding.length === 1 && search.length === 1 };
++}
++
++// Map only requested UTF-16 boundaries; no dense per-character offset array is needed.
++function dsearchCjkOffsets(text: string, offsets: number[], reverse: boolean): number[] {
++  const points = [...new Set(offsets)].sort((a, b) => a - b), mapped = new Map<number, number>();
++  let cursor = 0, original = 0, normalized = 0;
++  const emit = (length: number, generated = false) => {
++    const from = reverse ? normalized : original, width = generated ? (reverse ? 1 : 0) : length;
++    while (cursor < points.length && points[cursor]! <= from + width) {
++      const point = points[cursor++]!;
++      if (point < from) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++      mapped.set(point, (reverse ? original : normalized) + (generated ? 0 : point - from));
++    }
++    if (!generated) original += length;
++    normalized += generated ? 1 : length;
++  };
++  for (const match of text.matchAll(CJK_RUN_PATTERN)) {
++    emit(match.index! - original);emit(0, true);
++    const chars = [...match[0]];
++    for (let i = 0; i < chars.length; i++) { if (i) emit(0, true);emit(chars[i]!.length); }
++    emit(0, true);
++  }
++  emit(text.length - original);
++  if (cursor !== points.length) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++  return offsets.map(point => mapped.get(point)!);
++}
++
++/** Exact FTS highlight ranges from the existing index, restricted to caller-verified primary spans. */
++export async function dsearchLexicalMatches(store: Store, query: string, inputs: { file: string; primaryRanges: { start: number; end: number }[] }[]) {
++  if (inputs.length > 80) throw new CompatibilityError("INVALID_REQUEST");
++  const fts = buildFTS5Query(query);if (!fts) return [];
++  const result = [];
++  for (const input of inputs) {
++    await compatibilityYield("locating-evidence", result.length);
++    const uri = /^qmd:\/\/([A-Za-z0-9_-]{1,128})\/(.{1,4096})$/.exec(input.file);
++    if (!uri || input.primaryRanges.length > 128) throw new CompatibilityError("INVALID_REQUEST");
++    const marker = randomUUID(), begin = "<" + marker + ">", finish = "</" + marker + ">";
++    const row = store.db.prepare(`SELECT content.doc AS original,documents_fts.body AS normalized,
++      highlight(documents_fts,2,?,?) AS marked FROM documents_fts
++      JOIN documents d ON d.id=documents_fts.rowid JOIN content ON content.hash=d.hash
++      WHERE documents_fts MATCH ? AND d.active=1 AND d.collection=? AND d.path=?`).get(begin, finish, fts, uri[1]!, uri[2]!) as { original: string; normalized: string; marked: string } | undefined;
++    if (!row) continue;
++    if (row.normalized !== normalizeCjkForFTS(row.original) || row.original.includes(begin) || row.original.includes(finish)) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++    for (const span of input.primaryRanges) if (!Number.isSafeInteger(span.start) || !Number.isSafeInteger(span.end) || span.start < 0 || span.end < span.start || span.end > row.original.length) throw new CompatibilityError("INVALID_REQUEST");
++    const boundaries = dsearchCjkOffsets(row.original, input.primaryRanges.flatMap(span => [span.start, span.end]), false);
++    const primary = input.primaryRanges.map((_, i) => ({ start: boundaries[2 * i]!, end: boundaries[2 * i + 1]! }));
++    const ranges: { start: number; end: number }[] = [];let cursor = 0, inserted = 0;
++    while (ranges.length < 64) {
++      const from = row.marked.indexOf(begin, cursor);if (from < 0) break;
++      const to = row.marked.indexOf(finish, from + begin.length);if (to < 0) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++      const start = from - inserted, end = to - inserted - begin.length;
++      if (primary.some(span => start < span.end && end > span.start)) ranges.push({ start, end });
++      inserted += begin.length + finish.length;cursor = to + finish.length;
++    }
++    const original = dsearchCjkOffsets(row.original, ranges.flatMap(span => [span.start, span.end]), true);
++    result.push({ file: input.file, projectionSha256: createHash("sha256").update(row.original).digest("hex"),
++      ranges: ranges.map((_, i) => ({ start: original[2 * i]!, end: original[2 * i + 1]! })) });
++  }
++  return result;
 +}

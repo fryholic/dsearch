@@ -32,9 +32,21 @@ importers:
 
   apps/daemon:
     dependencies:
+      '@dsearch/catalog':
+        specifier: workspace:*
+        version: link:../../packages/catalog
       '@dsearch/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@dsearch/generations':
+        specifier: workspace:*
+        version: link:../../packages/generations
+      '@dsearch/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@dsearch/search':
+        specifier: workspace:*
+        version: link:../../packages/search
 
   apps/mcp: {}
 
@@ -51,6 +63,21 @@ importers:
       react-dom:
         specifier: 19.2.0
         version: 19.2.0(react@19.2.0)
+      remark-frontmatter:
+        specifier: 5.0.0
+        version: 5.0.0
+      remark-gfm:
+        specifier: 4.0.1
+        version: 4.0.1
+      remark-math:
+        specifier: 6.0.0
+        version: 6.0.0
+      remark-parse:
+        specifier: 11.0.0
+        version: 11.0.0
+      unified:
+        specifier: 11.0.5
+        version: 11.0.5
 
   packages/catalog:
     dependencies:
@@ -123,7 +150,26 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
-  packages/search: {}
+  packages/search:
+    dependencies:
+      '@dsearch/catalog':
+        specifier: workspace:*
+        version: link:../catalog
+      '@dsearch/compiler':
+        specifier: workspace:*
+        version: link:../compiler
+      '@dsearch/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@dsearch/engine-qmd':
+        specifier: workspace:*
+        version: link:../engine-qmd
+      '@dsearch/generations':
+        specifier: workspace:*
+        version: link:../generations
+      '@dsearch/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
   packages/ui: {}
 

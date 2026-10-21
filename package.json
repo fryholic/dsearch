@@ -9,6 +9,9 @@
     "node": ">=24.19.0 <25"
   },
   "scripts": {
+    "dsearch": "node apps/cli/dist/main.js",
+    "daemon": "node apps/daemon/dist/main.js",
+    "p3:verify": "node scripts/p3-verify.mjs",
     "check": "pnpm build && node scripts/check-structure.mjs && node scripts/build-tokens.mjs --check && pnpm test:unit && pnpm test:security",
     "test:security": "node --test tests/security/*.test.mjs",
     "local:setup": "node scripts/setup-local.mjs",

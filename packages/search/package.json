@@ -10,5 +10,13 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@dsearch/catalog": "workspace:*",
+    "@dsearch/compiler": "workspace:*",
+    "@dsearch/contracts": "workspace:*",
+    "@dsearch/engine-qmd": "workspace:*",
+    "@dsearch/generations": "workspace:*",
+    "@dsearch/runtime": "workspace:*"
   }
 }

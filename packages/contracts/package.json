@@ -9,6 +9,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./control": {"types":"./dist/control.d.ts","import":"./dist/control.js"},
+    "./search": {"types":"./dist/search.d.ts","import":"./dist/search.js"},
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

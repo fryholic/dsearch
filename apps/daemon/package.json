@@ -12,6 +12,10 @@
     }
   },
   "dependencies": {
-    "@dsearch/contracts": "workspace:*"
+    "@dsearch/contracts": "workspace:*",
+    "@dsearch/catalog": "workspace:*",
+    "@dsearch/generations": "workspace:*",
+    "@dsearch/search": "workspace:*",
+    "@dsearch/runtime": "workspace:*"
   }
 }

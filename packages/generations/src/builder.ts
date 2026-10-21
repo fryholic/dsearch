@@ -4,6 +4,7 @@ import { join, basename, extname } from "node:path";
 import { Catalog, canonicalJSON, digest } from "@dsearch/catalog";
 import { compileDocument, type Passage, type CoverageBlock, type CompiledDocument } from "@dsearch/compiler";
 import { DsearchError, type ProfileManifest } from "@dsearch/contracts";
+import { JobInfo } from "@dsearch/contracts/control";
 import { QmdWorker, type EngineResponse, type OpenEngine } from "@dsearch/engine-qmd";
 import { atomicFile, sealFiles, verifySeal } from "./seal.js";
 export type GenerationDocument = { doc_id: string; revision_id: string | null; collection_id: string; state: "included" | "partial" | "lexical_only" | "excluded" | "pending" | "failed"; reason: string | null; coverage: CoverageBlock[] };
@@ -16,12 +17,13 @@ const timestamp = () => new Date().toISOString();
 /** Manual full-generation builder. Incremental reuse and restart recovery follow in P6. */
 export class GenerationBuilder {
   private active: ActiveBuild | undefined;
+  private closing = false;
   constructor(readonly catalog: Catalog, readonly options: { engineRoot: string; modelRoot: string; profile: ProfileManifest; embedRole: "embed" | "reference"; fault?: (phase: string) => void | Promise<void> }) {}
   get busy(): boolean { return this.active !== undefined; }
   getJob(id: string) {
     const row = this.catalog.state.db.prepare("SELECT job_id,generation_id,state,phase,progress_json,cancel_requested,error_code,updated_at FROM jobs WHERE job_id=?").get(id);
     if (!row) throw new DsearchError("NOT_FOUND");
-    return { ...row, state: row.cancel_requested && ["queued", "running"].includes(String(row.state)) ? "cancel_requested" : row.state, progress: JSON.parse(String(row.progress_json)), progress_json: undefined };
+    return JobInfo.parse({ job_id: row.job_id, generation_id: row.generation_id, state: row.cancel_requested && ["queued", "running"].includes(String(row.state)) ? "cancel_requested" : row.state, phase: row.phase, progress: JSON.parse(String(row.progress_json)), error_code: row.error_code, updated_at: row.updated_at });
   }
   cancel(id: string): void {
     this.getJob(id);
@@ -29,6 +31,7 @@ export class GenerationBuilder {
     this.catalog.state.db.prepare("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE job_id=?").run(timestamp(), id);this.active.controller.abort();
   }
   start(): BuildHandle {
+    if (this.closing) throw new DsearchError("SERVICE_UNAVAILABLE");
     if (this.active) throw new DsearchError("BUSY");
     const state = this.catalog.state, profile = this.options.profile, fp = digest(canonicalJSON(profile)), jobId = randomUUID(), genId = randomUUID();
     const directory = join(state.root, "generations", genId), created = timestamp();
@@ -44,6 +47,7 @@ export class GenerationBuilder {
     const completion = Promise.resolve().then(() => this.perform(jobId, genId, directory, fp, controller.signal)).finally(() => { if (this.active?.handle.job_id === jobId) this.active = undefined; });
     const handle = { job_id: jobId, generation_id: genId, completion };this.active = { controller, handle };void completion.catch(() => {});return handle;
   }
+  async close(): Promise<void> { this.closing = true;const active = this.active;if (active) { active.controller.abort();await active.handle.completion.catch(() => {}); } }
   private phase(jobId: string, phase: string, progress: object = {}): void {
     this.catalog.state.db.prepare("UPDATE jobs SET state='running',phase=?,progress_json=?,updated_at=? WHERE job_id=?").run(phase, canonicalJSON(progress), timestamp(), jobId);
   }

@@ -91,3 +91,13 @@ test('YAML validation rejects duplicate keys, aliases, recursive budgets and inc
  for(const yaml of ['role: lesson\nrole: concept','role: [concept]','topics: text','x: !unknown tag','x: &recursive [*recursive]','- list item'])assert.throws(()=>parseMetadata('---\n'+yaml+'\n---\ntext'),{code:'INVALID_METADATA'});
  assert.throws(()=>parseMetadata('---\nunclosed'),{code:'INVALID_METADATA'});
 });
+
+test('literal byte, deadline and entry budgets preserve unvisited identities and report actual bytes',async t=>{
+ const {root,catalog,put}=await fixture(t);await put('a.md','# A');await put('b.md','# B');await put('c.md',Buffer.from([255]));const col=await catalog.addCollection({name:'budget',root});await catalog.reconcile(col.collection_id);const ids=current(catalog,col.collection_id).map(d=>d.doc_id);
+ const options={captureSources:true,budget:{maxBytesPerFile:10,maxTotalBytes:3,deadline:Date.now()+5000}};
+ const capped=await catalog.reconcile(col.collection_id,options);assert.equal(capped.stop_reason,'byte_limit');assert.equal(capped.read_bytes,3);assert.equal(capped.captured_sources.length,1);assert.deepEqual(current(catalog,col.collection_id).map(d=>d.doc_id),ids);
+ const expired=await catalog.reconcile(col.collection_id,{...options,budget:{...options.budget,deadline:0}});assert.equal(expired.stop_reason,'time_limit');assert.equal(expired.read_bytes,0);assert.deepEqual(current(catalog,col.collection_id).map(d=>d.doc_id),ids);
+ const entry=await catalog.reconcile(col.collection_id,{...options,maxEntries:1,budget:{...options.budget,maxTotalBytes:100}});assert.equal(entry.stop_reason,'entry_limit');assert.deepEqual(current(catalog,col.collection_id).map(d=>d.doc_id),ids);
+ const complete=await catalog.reconcile(col.collection_id,{...options,budget:{...options.budget,maxTotalBytes:100}});assert.equal(complete.read_bytes,7);assert.equal(complete.counts.unsupported_encoding,1);
+ const doc=current(catalog,col.collection_id).find(d=>d.relative_path==='a.md');const eof=await catalog.read({...request(doc),locator:{kind:'markdown',start:{line:1,column_utf16:0},end:{line:2,column_utf16:0}}});assert.equal(eof.text,'# A');
+});

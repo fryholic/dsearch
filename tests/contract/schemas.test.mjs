@@ -4,7 +4,7 @@ import {SearchRequest,ReadRequest,MetadataFilter,ProfileManifest,ErrorEnvelope,s
 const base={query:'서명 입력의 바이트열',purpose:'find',mode:'hybrid',rerank:true,collections:['tech']};
 test('search boundary rejects unsupported fields, inconsistent modes and duplicate scopes',()=>{
  assert.equal(SearchRequest.parse(base).candidate_limit,40);
- for(const v of [{...base,path:'/etc/passwd'},{...base,mode:'lexical'},{...base,collections:['tech','tech']},{...base,query:'  '},{...base,candidate_limit:100}])assert.equal(SearchRequest.safeParse(v).success,false);
+ for(const v of [{...base,path:'/etc/passwd'},{...base,mode:'lexical'},{...base,collections:['tech','tech']},{...base,query:'  '},{...base,candidate_limit:100},{...base,query:'한'.repeat(3000)}])assert.equal(SearchRequest.safeParse(v).success,false);
  assert.ok(SearchRequest.safeParse({...base,mode:'lexical',rerank:false}).success);
 });
 test('source reads require identity, revision and a bounded ordered locator',()=>{
@@ -17,7 +17,7 @@ test('metadata AST rejects depth and node attacks before recursive parsing',()=>
  assert.deepEqual(MetadataFilter.parse({and:[leaf]}),{and:[leaf]});
  let deep=leaf;for(let i=0;i<10000;i++)deep={not:deep};
  assert.equal(MetadataFilter.safeParse(deep).success,false);
- for(const v of [{and:Array(65).fill(leaf)},{field:'raw_sql',operator:'eq',value:'x'},{...leaf,operator:'exists',value:'true'},{...leaf,value:'x'.repeat(1025)},{...leaf,operator:'in',value:Array(129).fill('x')}])assert.equal(MetadataFilter.safeParse(v).success,false);
+ for(const v of [{and:Array(65).fill(leaf)},{field:'raw_sql',operator:'eq',value:'x'},{...leaf,operator:'exists',value:'true'},{...leaf,value:'x'.repeat(1025)},{...leaf,operator:'in',value:Array(129).fill('x')},{...leaf,operator:'in',value:[]},{...leaf,operator:'all',value:['x',true]}])assert.equal(MetadataFilter.safeParse(v).success,false);
 });
 test('client envelope rejects incompatible versions and unresolved model manifests',()=>{
  const schema=successEnvelope(SearchRequest);

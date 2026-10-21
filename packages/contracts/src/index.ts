@@ -23,8 +23,11 @@ const filterNode: z.ZodType<Filter> = z.lazy(() => z.union([
     field: z.string().regex(/^(document_key|metadata\.[a-z][a-z0-9_.-]{0,63})$/),
     operator: z.enum(["eq", "ne", "in", "all", "exists"]),
     value: z.union([scalar, z.array(scalar).max(128)]),
-  }).refine(v => v.operator === "exists" ? typeof v.value === "boolean"
-    : ["in", "all"].includes(v.operator) ? Array.isArray(v.value) : !Array.isArray(v.value), "Operator/value mismatch"),
+  }).refine(v => {
+    const value = v.value;
+    return v.operator === "exists" ? typeof value === "boolean" : ["in", "all"].includes(v.operator)
+      ? Array.isArray(value) && value.length > 0 && value.every(x => typeof x === typeof value[0]) : !Array.isArray(value);
+  }, "Operator/value mismatch"),
 ]));
 // Inspect bounded JSON before recursive parsing, so hostile nesting cannot overflow the parser stack.
 export const MetadataFilter = z.unknown().transform((input, ctx): Filter => {
@@ -57,13 +60,18 @@ export const MetadataFilter = z.unknown().transform((input, ctx): Filter => {
 const collections = z.array(Identifier).min(1).max(32)
   .refine(ids => new Set(ids).size === ids.length, "Duplicate collection");
 export const SearchRequest = z.strictObject({
-  query: z.string().trim().min(1).max(8192), purpose: z.literal("find"), mode: Mode,
+  query: z.string().trim().min(1).max(8192).refine(v => new TextEncoder().encode(v).byteLength <= 8192), purpose: z.literal("find"), mode: Mode,
   rerank: z.boolean(), collections, limit: z.number().int().min(1).max(50).default(10),
   candidate_limit: z.number().int().min(1).max(80).default(40),
   allow_degraded: z.boolean().default(false), expected_epoch: z.number().int().positive().nullable().optional(),
   filter: MetadataFilter.optional(),
 }).refine(v => v.mode !== "lexical" || !v.rerank, "Lexical search cannot rerank");
 export type SearchRequest = z.infer<typeof SearchRequest>;
+// Product requests stay at 50 documents; the internal engine may return 80 passages for grouping.
+export const EngineSearchRequest = SearchRequest.safeExtend({ limit: z.number().int().min(1).max(80), collections: z.array(Identifier).min(1).max(64).refine(v => new Set(v).size === v.length), query: z.string().min(1).max(32768).refine(v => new TextEncoder().encode(v).byteLength <= 32768) });
+export const LiteralRequest = z.strictObject({ query: z.string().min(1).max(1024), collections,
+  ignore_case: z.boolean().default(false), limit: z.number().int().min(1).max(200).default(200) });
+export type LiteralRequest = z.infer<typeof LiteralRequest>;
 export const DocumentRef = z.strictObject({ doc_id: z.uuid(), revision_id: Identifier });
 export const ReadRequest = DocumentRef.extend({ locator: Locator,
   context_before_lines: z.number().int().min(0).max(100).default(0),
@@ -77,7 +85,7 @@ export const CollectionRequest = z.strictObject({
 });
 export type CollectionRequest = z.infer<typeof CollectionRequest>;
 export const JobState = z.enum(["queued", "running", "succeeded", "obsolete", "retry_wait", "failed", "cancel_requested", "cancelled"]);
-export const ErrorCode = z.enum(["INVALID_REQUEST", "UNSUPPORTED_VERSION", "COMPATIBILITY_FAILED", "MODEL_NOT_INSTALLED", "MODEL_UNAVAILABLE", "INPUT_TOO_LONG", "RERANK_UNAVAILABLE", "CANCELLED", "WORKER_EXITED", "BUSY", "STALE_REVISION", "INVALID_LOCATOR", "UNSUPPORTED_LOCATOR", "SCOPE_DENIED", "INTERNAL_ERROR", "NOT_FOUND", "SCOPE_INCOMPLETE", "UNSUPPORTED_ENCODING", "INVALID_METADATA", "SOURCE_PENDING", "STALE_EPOCH", "SOURCE_MAP_MISMATCH", "SOURCE_TOO_LARGE"]);
+export const ErrorCode = z.enum(["INVALID_REQUEST", "UNSUPPORTED_VERSION", "COMPATIBILITY_FAILED", "MODEL_NOT_INSTALLED", "MODEL_UNAVAILABLE", "INPUT_TOO_LONG", "RERANK_UNAVAILABLE", "CANCELLED", "WORKER_EXITED", "BUSY", "STALE_REVISION", "INVALID_LOCATOR", "UNSUPPORTED_LOCATOR", "SCOPE_DENIED", "INTERNAL_ERROR", "NOT_FOUND", "SCOPE_INCOMPLETE", "UNSUPPORTED_ENCODING", "INVALID_METADATA", "SOURCE_PENDING", "STALE_EPOCH", "SOURCE_MAP_MISMATCH", "SOURCE_TOO_LARGE", "UNAUTHORIZED", "NO_ACTIVE_GENERATION", "RESULT_EXPIRED", "INVALID_QUERY", "SERVICE_UNAVAILABLE", "INPUT_TOO_LARGE"]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 export class DsearchError extends Error {
   constructor(public readonly code: ErrorCode, message: string = code, public readonly retryable = false) {

@@ -1,0 +1,11 @@
+import { z } from 'zod';
+import { Identifier, Digest, JobState, ErrorCode, Locator } from './index.js';
+export const CollectionInfo = z.strictObject({ collection_id: z.uuid(), name: z.string().max(80), root_path: z.string().max(4096), enabled: z.boolean(), preset: z.enum(['general', 'learning']), include: z.array(z.string()), exclude: z.array(z.string()), scope_fp: Digest, coverage: z.record(z.string(), z.number().int().nonnegative()) });
+export type CollectionInfo = z.infer<typeof CollectionInfo>;
+export const CollectionPatch = z.strictObject({ enabled: z.boolean().optional(), preset: z.enum(['general', 'learning']).optional(), include: z.array(z.string().max(512)).max(32).optional(), exclude: z.array(z.string().max(512)).max(64).optional() }).refine(v => Object.keys(v).length > 0);
+export const JobInfo = z.strictObject({ job_id: Identifier, generation_id: Identifier.nullable(), state: JobState, phase: z.string().max(64), progress: z.record(z.string(), z.number().finite().nonnegative()), error_code: ErrorCode.nullable(), updated_at: z.iso.datetime() });
+export type JobInfo = z.infer<typeof JobInfo>;
+export const AppStatus = z.strictObject({ version: z.string(), instance_id: z.uuid(), pid: z.number().int().positive(), source_seq: z.number().int().nonnegative(), generation: z.strictObject({ generation_id: Identifier, epoch: z.number().int().positive(), profile_fp: Digest, source_seq: z.number().int().nonnegative() }).nullable(), profile: z.strictObject({ profile_id: Identifier, profile_fp: Digest, status: z.enum(['draft', 'validated', 'retired']) }), busy: z.boolean(), needs_rebuild: z.boolean(), modes: z.strictObject({ lexical: z.boolean(), literal: z.literal(true) }), coverage: z.record(z.string(), z.number().int().nonnegative()), jobs: z.array(JobInfo).max(20) });
+export type AppStatus = z.infer<typeof AppStatus>;
+export const ReadResponse = z.strictObject({ doc_id: z.uuid(), revision_id: Identifier, relative_path: z.string().max(4096), collection_id: z.uuid(), locator: Locator, start_line: z.number().int().positive(), end_line: z.number().int().positive(), text: z.string().refine(v => new TextEncoder().encode(v).byteLength <= 65536), truncated: z.boolean() });
+export type ReadResponse = z.infer<typeof ReadResponse>;

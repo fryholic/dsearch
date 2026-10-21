@@ -12,8 +12,9 @@ export type Collection = { collection_id: string; name: string; root_path: strin
 export type SourceDocument = { doc_id: string; collection_id: string; relative_path: string; file_key: string | null; present: number; eligibility: Eligibility; eligibility_reason: string | null; latest_revision_id: string | null; observed_seq: number; observed_at: string };
 type Source = Awaited<ReturnType<typeof readStableSource>>;
 type Observation = { relative_path: string; file_key: string | null; eligibility: Eligibility; reason: string; source?: Source };
-type Boundary = { path: string; eligibility: Eligibility; reason: string; incomplete: boolean };
-export type ScanReport = { collection_id: string; source_seq: number; scope_incomplete: boolean; counts: Record<string, number>; boundaries: Boundary[]; documents: SourceDocument[] };
+type Boundary = { path: string; eligibility: Eligibility; reason: string; incomplete: boolean; retain?: boolean };
+export type ScanBudget = { maxBytesPerFile: number; maxTotalBytes: number; deadline: number };
+export type ScanReport = { collection_id: string; source_seq: number; scope_incomplete: boolean; counts: Record<string, number>; boundaries: Boundary[]; documents: SourceDocument[]; read_bytes: number; skipped_files: number; stop_reason: "time_limit" | "byte_limit" | "entry_limit" | null; captured_sources?: { document: SourceDocument; source: Source }[] };
 const now = () => new Date().toISOString();
 
 /** Filesystem discovery precedes a short synchronous product-state transaction. */
@@ -57,21 +58,25 @@ export class Catalog {
     const row = this.state.db.prepare("SELECT * FROM source_documents WHERE doc_id=?").get(id) as SourceDocument | undefined;
     if (!row) throw new DsearchError("NOT_FOUND");return row;
   }
-  async reconcile(id: string, options: { signal?: AbortSignal; maxEntries?: number } = {}): Promise<ScanReport> {
+  async reconcile(id: string, options: { signal?: AbortSignal; maxEntries?: number; budget?: ScanBudget; captureSources?: boolean } = {}): Promise<ScanReport> {
     if (this.scanning.has(id)) throw new DsearchError("BUSY");this.scanning.add(id);
     try {
       const collection = this.collection(id);if (!collection.enabled) throw new DsearchError("SCOPE_DENIED");
       const policy = JSON.parse(collection.scope_json) as ScopePolicy;await checkRoot(collection.root_path, policy);
       const previous = this.documents(id).filter(d => d.present), observations: Observation[] = [], boundaries: Boundary[] = [];
-      const seen = new Set<string>();let count = 0;
+      const previousByPath = new Map(previous.map(d => [d.relative_path, d]));
+      const seen = new Set<string>();let count = 0, readBytes = 0, skipped = 0, stopped = false;
+      let stopReason: ScanReport["stop_reason"] = null;
       const abort = () => { if (options.signal?.aborted) throw new DsearchError("CANCELLED"); };
+      const budgetStop = () => { if (options.budget && Date.now() >= options.budget.deadline) { stopped = true;stopReason = "time_limit"; }return stopped; };
       const walk = async (path: string, depth: number): Promise<void> => {
-        abort();if (depth > 128) { boundaries.push({ path, eligibility: "unreadable", reason: "depth_limit", incomplete: true });return; }
+        abort();if (budgetStop()) return;if (depth > 128) { boundaries.push({ path, eligibility: "unreadable", reason: "depth_limit", incomplete: true });return; }
         let entries;
         try { entries = await readdir(join(collection.root_path, path), { withFileTypes: true }); }
         catch { boundaries.push({ path, eligibility: "unreadable", reason: "directory_unreadable", incomplete: true });return; }
         for (const entry of entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
-          abort();if (++count > (options.maxEntries ?? 250_000)) throw new DsearchError("SCOPE_INCOMPLETE");
+          abort();if (budgetStop()) return;
+          if (++count > (options.maxEntries ?? 250_000)) { if (options.budget) { stopped = true;stopReason = "entry_limit";return; }throw new DsearchError("SCOPE_INCOMPLETE"); }
           const child = path ? path + "/" + entry.name : entry.name, full = join(collection.root_path, child);let info;
           try { info = await lstat(full, { bigint: true }); }
           catch { boundaries.push({ path: child, eligibility: "unreadable", reason: "stat_failed", incomplete: true });if (!entry.isDirectory()) observations.push({ relative_path: child, file_key: null, eligibility: "unreadable", reason: "stat_failed" });continue; }
@@ -90,8 +95,15 @@ export class Catalog {
           }
           let eligibility = pathEligibility(child, policy);if (!info.isFile()) eligibility = { eligibility: "excluded_source", reason: "not_regular_file" };
           if (eligibility.eligibility !== "eligible") { observations.push({ relative_path: child, file_key: key, ...eligibility });continue; }
+          if (options.budget && info.size > BigInt(Math.max(0, Math.min(options.budget.maxBytesPerFile, options.budget.maxTotalBytes - readBytes)))) {
+            skipped++;stopReason ??= "byte_limit";const candidate = previousByPath.get(child), old = candidate?.file_key === key ? candidate : undefined;
+            observations.push({ relative_path: child, file_key: key, eligibility: old?.eligibility ?? "pending", reason: old?.eligibility_reason ?? "literal_file_limit" });
+            if (readBytes >= options.budget.maxTotalBytes || info.size <= BigInt(options.budget.maxBytesPerFile)) stopped = true;
+            continue;
+          }
           try {
-            const source = await readStableSource(collection.root_path, child, policy);
+            const cap = options.budget ? Math.min(options.budget.maxBytesPerFile, options.budget.maxTotalBytes - readBytes) : 32 * 1024 * 1024;
+            const source = await readStableSource(collection.root_path, child, policy, cap, bytes => { readBytes += bytes; });
             observations.push({ relative_path: child, file_key: source.fileKey, ...metadataEligibility(source.metadata, policy), source });
           } catch (e) {
             const code = e instanceof DsearchError ? e.code : "INTERNAL_ERROR";
@@ -100,7 +112,7 @@ export class Catalog {
           }
         }
       };
-      await walk("", 0);abort();await checkRoot(collection.root_path, policy);
+      await walk("", 0);abort();if (stopped) boundaries.push({ path: "", eligibility: "pending", reason: "scan_budget", incomplete: true, retain: true });await checkRoot(collection.root_path, policy);
       if (!this.collection(id).enabled || this.collection(id).scope_fp !== collection.scope_fp) throw new DsearchError("STALE_EPOCH");
       const matched = new Set<string>(), byPath = new Map(previous.map(d => [d.relative_path, d])), assigned = new Map<Observation, SourceDocument>();
       for (const observation of observations) {
@@ -125,7 +137,7 @@ export class Catalog {
       }
       for (const old of previous.filter(d => !matched.has(d.doc_id))) {
         const boundary = !seen.has(old.relative_path) ? boundaries.find(b => b.path === "" || old.relative_path === b.path || old.relative_path.startsWith(b.path + "/")) : undefined;
-        rows.push({ ...old, present: boundary ? 1 : 0, eligibility: boundary?.eligibility ?? "deleted", eligibility_reason: boundary?.reason ?? "not_present", observed_at: now() });
+        rows.push({ ...old, present: boundary ? 1 : 0, eligibility: boundary?.retain ? old.eligibility : boundary?.eligibility ?? "deleted", eligibility_reason: boundary?.retain ? old.eligibility_reason : boundary?.reason ?? "not_present", observed_at: now() });
       }
       const comparable = (d: SourceDocument) => canonicalJSON([d.relative_path, d.file_key, d.present, d.eligibility, d.eligibility_reason, d.latest_revision_id]);
       const oldById = new Map(previous.map(d => [d.doc_id, d]));
@@ -143,11 +155,13 @@ export class Catalog {
       });
       const documents = this.documents(id), counts: Record<string, number> = {};
       for (const doc of documents) counts[doc.eligibility] = (counts[doc.eligibility] ?? 0) + 1;
-      return { collection_id: id, source_seq: this.state.sourceSeq, scope_incomplete: boundaries.some(b => b.incomplete), counts, boundaries, documents };
+      const captured = options.captureSources ? observations.flatMap((o, i) => o.source && o.eligibility === "eligible" ? [{ document: rows[i]!, source: o.source }] : []) : undefined;
+      return { collection_id: id, source_seq: this.state.sourceSeq, scope_incomplete: boundaries.some(b => b.incomplete), counts, boundaries, documents, read_bytes: readBytes, skipped_files: skipped, stop_reason: stopReason, ...(captured ? { captured_sources: captured } : {}) };
     } finally { this.scanning.delete(id); }
   }
   async readDocument(docId: string, expectedRevision: string): Promise<Source & { document: SourceDocument; collection: Collection }> {
     const doc = this.document(docId), collection = this.collection(doc.collection_id), policy = JSON.parse(collection.scope_json) as ScopePolicy;
+    if (within(this.state.root, join(collection.root_path, doc.relative_path))) throw new DsearchError("SCOPE_DENIED");
     if (!collection.enabled || !doc.present || doc.eligibility !== "eligible" || pathEligibility(doc.relative_path, policy).eligibility !== "eligible") throw new DsearchError("SCOPE_DENIED");
     if (!doc.latest_revision_id || doc.latest_revision_id !== expectedRevision) throw new DsearchError("STALE_REVISION");
     const source = await readStableSource(collection.root_path, doc.relative_path, policy);
@@ -161,8 +175,10 @@ export class Catalog {
     const parsed = ReadRequest.safeParse(input);if (!parsed.success) throw new DsearchError("INVALID_REQUEST");
     const request = parsed.data, source = await this.readDocument(request.doc_id, request.revision_id), lines = source.text.split("\n");
     const { start, end } = request.locator;
-    if (start.line > lines.length || end.line > lines.length || start.column_utf16 > lines[start.line - 1]!.length || end.column_utf16 > lines[end.line - 1]!.length) throw new DsearchError("INVALID_LOCATOR");
-    const first = Math.max(1, start.line - request.context_before_lines), last = Math.min(lines.length, end.line + request.context_after_lines);
+    const eofEnd = end.line === lines.length + 1 && end.column_utf16 === 0;
+    if (start.line > lines.length || (!eofEnd && end.line > lines.length) || start.column_utf16 > lines[start.line - 1]!.length || (!eofEnd && end.column_utf16 > lines[end.line - 1]!.length)) throw new DsearchError("INVALID_LOCATOR");
+    const finalLine = end.column_utf16 === 0 && end.line > start.line ? end.line - 1 : end.line;
+    const first = Math.max(1, start.line - request.context_before_lines), last = Math.min(lines.length, finalLine + request.context_after_lines);
     const selected = lines.slice(first - 1, Math.min(last, first - 1 + request.max_lines));
     let text = selected.join("\n"), truncated = last - first + 1 > selected.length;
     while (new TextEncoder().encode(text).length > 65_536 && selected.length) { selected.pop();text = selected.join("\n");truncated = true; }

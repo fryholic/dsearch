@@ -1,0 +1,30 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {spawn} from 'node:child_process';
+const root=resolve(import.meta.dirname,'../..'),entry=join(root,'apps/cli/dist/main.js');
+function cli(dataRoot,args,options={}){return new Promise((resolve,reject)=>{const child=spawn(process.execPath,[entry,...args,'--data-root',dataRoot,'--json'],{stdio:['pipe','pipe','pipe']});let out='',err='',sent=false;child.stdout.on('data',v=>out+=v);child.stderr.on('data',v=>{err+=v;if(options.cancel&&!sent&&/queued|running|probe|scan|reconciling|embedding/.test(err)){sent=true;child.kill('SIGINT');}});child.on('error',reject);child.on('exit',code=>{try{assert.equal(out.trim().split('\n').length,1);resolve({code,packet:JSON.parse(out),err});}catch(e){reject(new Error('Invalid CLI JSON: '+out+' / '+err,{cause:e}));}});child.stdin.end(options.stdin);});}
+test('initial CLI owns lifecycle and shares actual HTTP IDs, revisions, locators and stale errors',async()=>{
+ await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/cli-')),data=join(folder,'data'),sources=join(folder,'source');await mkdir(sources);await writeFile(join(sources,'example.md'),'# ECDSA\n\n서명 검증과 canonical encoding.\n\n정확한 [a-z]+ 문자열.');
+ try{
+  const started=await cli(data,['serve','start']);assert.equal(started.code,0);const again=await cli(data,['serve','start']);assert.equal(again.packet.data.instance_id,started.packet.data.instance_id);
+  const added=await cli(data,['collection','add',sources,'--name','CLI 문서']);assert.equal(added.code,0);const id=added.packet.data.collection_id;
+  const token=(await readFile(join(data,'credentials/device-token'),'utf8')).trim(),runtime=JSON.parse(await readFile(join(data,'runtime.json'),'utf8'));
+  const http=async(method,path,value)=>{const response=await fetch(runtime.url+path,{method,headers:{authorization:'Bearer '+token,'content-type':'application/json'},...(value?{body:JSON.stringify(value)}:{})});return response.json();};
+  const built=await cli(data,['reconcile']);assert.equal(built.code,0,built.err);assert.equal(built.packet.data.state,'succeeded');assert.ok(built.err.length);
+  const found=await cli(data,['search','서명','--collection',id,'--mode','lexical']);assert.equal(found.code,0,found.err);const result=found.packet.data.results[0];assert.ok(result);
+  const apiSearch=await http('POST','/v1/searches',{query:'서명',purpose:'find',mode:'lexical',rerank:false,collections:[id]});let apiDone;for(let i=0;i<1000;i++){apiDone=await http('GET',apiSearch.data.status_url);if(apiDone.data.state==='completed')break;await new Promise(r=>setTimeout(r,10));}assert.deepEqual(apiDone.data.results,found.packet.data.results);
+  const read=await cli(data,['read',result.doc_id,'--revision',result.revision_id,'--lines','3:3']);assert.equal(read.code,0);assert.equal(read.packet.data.text,'서명 검증과 canonical encoding.');assert.equal(read.packet.data.start_line,3);assert.equal(read.packet.data.end_line,3);
+  const literal=await cli(data,['literal','--stdin','--collection',id],{stdin:'[a-z]+\n'});assert.equal(literal.code,0);assert.equal(literal.packet.data.matches.length,1);
+  const noHit=await cli(data,['search','definitelyabsentterm','--collection',id]);assert.equal(noHit.code,0);assert.equal(noHit.packet.data.results.length,0);
+  const bad=await cli(data,['search','서명','--limit','81']);assert.equal(bad.code,2);assert.equal(bad.packet.ok,false);
+  const deep=await cli(data,['search','서명','--mode','deep']);assert.equal(deep.code,2);
+  await writeFile(join(sources,'example.md'),'# ECDSA\n\n변경된 원문.');const stale=await cli(data,['read',result.doc_id,'--revision',result.revision_id,'--lines','3:3']);assert.equal(stale.code,5);assert.equal(stale.packet.error.code,'STALE_REVISION');
+  const disabled=await cli(data,['collection','disable',id]);assert.equal(disabled.code,0);const denied=await cli(data,['search','서명','--collection',id]);assert.equal(denied.code,3);
+  await cli(data,['collection','enable',id]);const cancelled=await cli(data,['reconcile'],{cancel:true});assert.equal(cancelled.code,130,cancelled.err);assert.equal(cancelled.packet.error.code,'CANCELLED');
+  const ui=await cli(data,['ui','--print-url']);assert.equal(ui.code,0);assert.ok(new URL(ui.packet.data.url).hash.startsWith('#code='));assert.ok(!ui.packet.data.url.includes(token));
+  const stopped=await cli(data,['serve','stop']);assert.equal(stopped.code,0);await assert.rejects(readFile(join(data,'runtime.json')),{code:'ENOENT'});const offline=await cli(data,['status','--no-start']);assert.equal(offline.code,4);
+  const restarted=await cli(data,['serve','start']);assert.equal(restarted.code,0);assert.notEqual(restarted.packet.data.instance_id,started.packet.data.instance_id);assert.equal((await cli(data,['collection','list'])).packet.data[0].collection_id,id);
+ }finally{await cli(data,['serve','stop']).catch(()=>{});await rm(folder,{recursive:true,force:true});}
+});

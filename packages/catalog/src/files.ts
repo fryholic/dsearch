@@ -16,7 +16,7 @@ export async function checkRoot(root: string, policy: ScopePolicy): Promise<void
   } catch { throw new DsearchError("SCOPE_DENIED"); }
 }
 /** No symlink component, no final-link following, and full-content revision validation. */
-export async function readStableSource(root: string, path: string, policy: ScopePolicy, maxBytes = 32 * 1024 * 1024) {
+export async function readStableSource(root: string, path: string, policy: ScopePolicy, maxBytes = 32 * 1024 * 1024, onRead?: (bytes: number) => void) {
   if (isAbsolute(path) || path.includes("\\") || path.split("/").some(x => !x || x === "." || x === "..")) throw new DsearchError("SCOPE_DENIED");
   await checkRoot(root, policy);
   const full = join(root, ...path.split("/"));
@@ -38,7 +38,7 @@ export async function readStableSource(root: string, path: string, policy: Scope
       if (!before.isFile()) throw new DsearchError("SCOPE_DENIED");
       if (before.size > BigInt(maxBytes)) throw new DsearchError("SOURCE_TOO_LARGE");
       const bytes = Buffer.alloc(Number(before.size));let offset = 0;
-      while (offset < bytes.length) { const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset); if (!bytesRead) break; offset += bytesRead; }
+      while (offset < bytes.length) { const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset); if (!bytesRead) break; offset += bytesRead;onRead?.(bytesRead); }
       const after = await handle.stat({ bigint: true });
       const atPath = await lstat(full, { bigint: true });
       await checkParents(); await checkRoot(root, policy);

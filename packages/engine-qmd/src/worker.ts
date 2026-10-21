@@ -1,6 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import { SearchRequest, DsearchError, ErrorCode } from "@dsearch/contracts";
+import { EngineSearchRequest, DsearchError, ErrorCode, type Filter } from "@dsearch/contracts";
 
 type Stats = Record<string, number | boolean>;
 type Hit = { file: string; title: string; body?: string; bestChunk?: string; bestChunkPos?: number; score: number; [key: string]: unknown };
@@ -15,6 +15,7 @@ type Store = {
   dsearchRerank(query: string, docs: { file: string; text: string }[]): Promise<unknown>;
   dsearchEmbedding(text: string, title: string, isQuery: boolean): Promise<unknown>;
   dsearchDevice(): Promise<unknown>; dsearchSnapshot(target: string): Promise<void>;
+  dsearchLexicalMatches(query: string, files: unknown[]): Promise<unknown>;
 };
 type Module = {
   createStore(options: unknown): Promise<Store>;
@@ -33,6 +34,18 @@ const object = (v: unknown): Record<string, unknown> => {
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new DsearchError("INVALID_REQUEST");
   return v as Record<string, unknown>;
 };
+function compileFilter(node: Filter): unknown {
+  const group = (operator: string, operands: unknown[]): unknown => operands.length <= 32 ? { operator, operands }
+    : { operator, operands: [group(operator, operands.slice(0, 32)), group(operator, operands.slice(32))] };
+  if ("and" in node) return group("and", node.and.map(compileFilter));
+  if ("or" in node) return group("or", node.or.map(compileFilter));
+  if ("not" in node) return { operator: "not", operand: compileFilter(node.not) };
+  const field = node.field === "document_key" ? "document_key" : node.field.slice("metadata.".length);
+  if (!["document_key", "role", "type", "status", "topics"].includes(field)) throw new DsearchError("INVALID_REQUEST");
+  if (Array.isArray(node.value) && node.value.length > 64) return group(node.operator === "in" ? "or" : "and", [
+    { field, operator: node.operator, value: node.value.slice(0, 64) }, { field, operator: node.operator, value: node.value.slice(64) }]);
+  return { field, operator: node.operator, value: node.value };
+}
 
 async function execute(payload: Record<string, unknown>, signal: AbortSignal, id: string): Promise<unknown> {
   const method = string(payload.method);
@@ -48,7 +61,11 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
     role = (payload.role ?? "probe") as typeof role;
     if (role !== "probe" && (typeof payload.generationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(payload.generationId))) throw new DsearchError("INVALID_REQUEST");
     if (role === "reader" && sdk.dsearchCapabilities?.sealedReadOnly !== true) throw new DsearchError("COMPATIBILITY_FAILED");
-    const collections = payload.collections ? object(payload.collections) : { probe: { path: string(payload.collectionPath), pattern: "**/*.md" } };
+    const requestedCollections = payload.collections ? object(payload.collections) : { probe: { path: string(payload.collectionPath), pattern: "**/*.md" } };
+    const collections = Object.fromEntries(Object.entries(requestedCollections).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, value]) => {
+      const entry = object(value);if (entry.pattern !== "**/*.md") throw new DsearchError("INVALID_REQUEST");
+      return [name, { path: string(entry.path), pattern: "**/*.md" }];
+    }));
     allowedCollections = Object.keys(collections);
     if (!allowedCollections.length || allowedCollections.length > 64 || allowedCollections.some(key => !/^[a-zA-Z0-9_-]{1,128}$/.test(key))) throw new DsearchError("INVALID_REQUEST");
     for (const value of Object.values(collections)) { const entry = object(value);string(entry.path);if (entry.pattern !== "**/*.md") throw new DsearchError("INVALID_REQUEST"); }
@@ -78,6 +95,11 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
       case "inspect": return current.dsearchInspectProjection(string(args.text), string(args.title), string(args.file));
       case "inspect_rerank": return current.dsearchInspectRerank(string(args.query), string(args.text));
       case "query_tokens": return current.dsearchQueryTokens(string(args.query));
+      case "lexical_matches": {
+        if (sdk.dsearchCapabilities?.lexicalEvidence !== true) throw new DsearchError("COMPATIBILITY_FAILED");
+        if (!Array.isArray(args.files) || args.files.length > 80 || string(args.query).length > 32768) throw new DsearchError("INVALID_REQUEST");
+        return current.dsearchLexicalMatches(string(args.query), args.files);
+      }
       case "embedding": {
         const text = string(args.text), title = string(args.title ?? ""), isQuery = args.isQuery === true;
         if (strict) return current.dsearchEmbedding(text, title, isQuery);
@@ -130,21 +152,21 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
       case "snapshot": await current.dsearchSnapshot(string(args.target)); return { complete: true };
       case "close": await current.close(); store = undefined; return { closed: true };
       case "search": {
-        const request = SearchRequest.parse(args);
+        const request = EngineSearchRequest.parse(args);
         if (request.collections.some(id => !allowedCollections.includes(id))) throw new DsearchError("SCOPE_DENIED");
-        if (request.filter) throw new DsearchError("INVALID_REQUEST", "Probe does not compile product metadata filters");
+        const filter = request.filter ? compileFilter(request.filter) : undefined;
         const line = request.query.replace(/\s+/g, " ");
         const search = async (mode: string, rerank: boolean) => {
           const values = mode === "lexical"
-          ? await current.searchLex(line, { collection: request.collections, limit: request.limit })
+          ? await current.searchLex(line, { collection: request.collections, limit: request.limit, filter })
           : await current.search({ ...(mode === "deep" ? { query: line } : { queries: [{ type: "lex", query: line }, { type: "vec", query: line }] }),
-            collections: request.collections, rerank, candidateLimit: request.candidate_limit, limit: request.limit, minScore: 0,
+            collections: request.collections, filter, rerank, candidateLimit: request.candidate_limit, limit: request.limit, minScore: 0,
             explain: true, chunkStrategy: "regex" });
           if (strict && mode === "lexical") stats.actualCandidates = values.length;
           return values.map(value => {
             const file = typeof value.file === "string" ? value.file : typeof value.filepath === "string" ? value.filepath : undefined;
             if (!file) throw new DsearchError("COMPATIBILITY_FAILED");
-            return { ...value, file };
+            return role === "reader" ? { file, score: value.score } : { ...value, file };
           });
         };
         try {

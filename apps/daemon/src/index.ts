@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import { API_VERSION } from "@dsearch/contracts";
+export {createApplication,type ApplicationOptions} from './server.js';
 
 /** P0 status surface. Search and collection mutation APIs are implemented in P3. */
 export async function createDiagnosticServer(status: () => unknown) {

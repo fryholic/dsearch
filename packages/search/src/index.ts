@@ -1,2 +1,3 @@
-// Workspace boundary for packages/search. Runtime implementation is pending.
-export {};
+export {ReaderPool,type ReadLease,type Snapshot} from './readers.js';
+export {SourceSearch,quotedKeywords,excerptRange} from './source-search.js';
+export {SearchSessions} from './sessions.js';
