@@ -970,3 +970,10 @@ td {
     scroll-behavior: auto !important;
   }
 }
+.source-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 12px; }
+.search-details { margin: 0 0 20px; padding: 16px; border: 1px solid var(--stroke-default); border-radius: 12px; overflow-wrap: anywhere; }
+.search-details p { margin: 12px 0 0; }
+.comparison-pins { margin: 0 0 20px; padding: 20px; border: 1px solid var(--selection-stroke); border-radius: 12px; }
+.comparison-pins h2, .supplemental h3 { font-size: 16px; line-height: 24px; margin: 0 0 12px; }
+.comparison-pins > .button { margin: 8px 8px 0 0; }
+.supplemental { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--stroke-default); }

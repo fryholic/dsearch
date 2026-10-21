@@ -1,3 +1,4 @@
+import { HeavyLane } from "@dsearch/runtime";
 import { randomUUID } from "node:crypto";
 import { mkdir, chmod } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
@@ -18,7 +19,7 @@ const timestamp = () => new Date().toISOString();
 export class GenerationBuilder {
   private active: ActiveBuild | undefined;
   private closing = false;
-  constructor(readonly catalog: Catalog, readonly options: { engineRoot: string; modelRoot: string; profile: ProfileManifest; embedRole: "embed" | "reference"; fault?: (phase: string) => void | Promise<void> }) {}
+  constructor(readonly catalog: Catalog, readonly options: { engineRoot: string; modelRoot: string; profile: ProfileManifest; embedRole: "embed" | "reference"; lane?: HeavyLane; beforeWork?: () => Promise<void>; fault?: (phase: string) => void | Promise<void> }) {}
   get busy(): boolean { return this.active !== undefined; }
   getJob(id: string) {
     const row = this.catalog.state.db.prepare("SELECT job_id,generation_id,state,phase,progress_json,cancel_requested,error_code,updated_at FROM jobs WHERE job_id=?").get(id);
@@ -54,11 +55,21 @@ export class GenerationBuilder {
   private async perform(jobId: string, genId: string, directory: string, fp: string, signal: AbortSignal): Promise<BuildResult> {
     const state = this.catalog.state, profile = this.options.profile, builder = new QmdWorker();let reader: QmdWorker | undefined;
     const check = () => { if (signal.aborted) throw new DsearchError("CANCELLED"); };
+    let releaseLane!: () => void;
     try {
+      if (this.options.lane) {
+        this.phase(jobId, "waiting-model");
+        releaseLane = await this.options.lane.acquire(signal);check();
+      }
+      await this.options.beforeWork?.();
       check();this.phase(jobId, "reconciling");
       const collections = this.catalog.listCollections().filter(c => c.enabled);
       if (!collections.length || collections.length > 32) throw new DsearchError("INVALID_REQUEST");
       const reports = [];for (const collection of collections) reports.push(await this.catalog.reconcile(collection.collection_id, { signal }));
+      if (reports.some(r => r.scope_incomplete)) {
+        this.phase(jobId, "scope-incomplete", { incomplete_collections: reports.filter(r => r.scope_incomplete).length, incomplete_boundaries: reports.reduce((n, r) => n + r.boundaries.filter(b => b.incomplete).length, 0) });
+        throw new DsearchError("SCOPE_INCOMPLETE");
+      }
       const sourceSeq = state.sourceSeq, scopes = Object.fromEntries(collections.map(c => [c.collection_id, c.scope_fp]));
       const expectedEpoch = Number(state.db.prepare("SELECT epoch FROM active_slot WHERE slot=1").get()?.epoch ?? 0);
       const docs = reports.flatMap(r => r.documents.filter(d => d.present));
@@ -148,6 +159,6 @@ export class GenerationBuilder {
       const cancelled = signal.aborted || (e instanceof DsearchError && e.code === "CANCELLED"), code = e instanceof DsearchError ? e.code : "INTERNAL_ERROR";
       state.transaction(() => { state.db.prepare("UPDATE generations SET state='invalid' WHERE generation_id=?").run(genId);state.db.prepare("UPDATE jobs SET state=?,phase='stopped',error_code=?,updated_at=? WHERE job_id=?").run(cancelled ? "cancelled" : "failed", cancelled ? "CANCELLED" : code, timestamp(), jobId); });
       throw new DsearchError(cancelled ? "CANCELLED" : code);
-    } finally { await builder.close();if (reader) await reader.close(); }
+    } finally { try { await builder.close();if (reader) await reader.close(); } finally { releaseLane?.(); } }
   }
 }

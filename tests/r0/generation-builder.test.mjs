@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,chmod} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {Catalog,StateStore} from '../../packages/catalog/dist/index.js';
 import {GenerationBuilder,createAlphaProfile,verifySeal} from '../../packages/generations/dist/index.js';
@@ -19,6 +19,12 @@ test('manual generation publishes only fully verified sources and preserves the 
   const slot=state.db.prepare('SELECT * FROM active_slot').get();assert.equal(slot.generation_id,built.generation_id);const directory=join(state.root,'generations',built.generation_id);const manifest=await verifySeal(directory,built.manifest_sha256);assert.equal(manifest.passages,2);
   const mappings=JSON.parse(await readFile(join(directory,'mappings.json'),'utf8'));assert.equal(mappings.length,2);assert.ok(mappings.every(p=>!('text' in p)));assert.ok(mappings.every(p=>p.revision_id));
   assert.equal(state.db.prepare('SELECT status FROM profiles').get().status,'validated');
+  // Unknown files beneath an inaccessible directory must never look like a complete index.
+  await mkdir(join(source,'blocked'));await writeFile(join(source,'blocked','unknown.md'),'# hidden during first scan');await chmod(join(source,'blocked'),0);
+  try {
+   const incomplete=new GenerationBuilder(catalog,options),attempt=incomplete.start();await assert.rejects(attempt.completion,{code:'SCOPE_INCOMPLETE'});assert.equal(incomplete.getJob(attempt.job_id).state,'failed');assert.equal(incomplete.getJob(attempt.job_id).error_code,'SCOPE_INCOMPLETE');assert.equal(catalog.scanStatus(col.collection_id).status,'incomplete');assert.equal(catalog.scanStatus(col.collection_id).incomplete_boundaries,1);assert.equal(state.db.prepare('SELECT generation_id FROM active_slot').get().generation_id,built.generation_id);
+  } finally { await chmod(join(source,'blocked'),0o700);await rm(join(source,'blocked'),{recursive:true}); }
+  await catalog.reconcile(col.collection_id);assert.equal(catalog.scanStatus(col.collection_id).status,'complete');
   // An injected build failure must not expose an incomplete generation.
   const failed=new GenerationBuilder(catalog,{...options,fault:phase=>{if(phase==='after-index')throw new Error('synthetic injected failure');}}),failure=failed.start();await assert.rejects(failure.completion,{code:'INTERNAL_ERROR'});assert.equal(failed.getJob(failure.job_id).state,'failed');assert.equal(state.db.prepare('SELECT generation_id FROM active_slot').get().generation_id,built.generation_id);
   // Change bytes after indexing, without a catalog watcher update.

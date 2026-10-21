@@ -28,6 +28,7 @@ let sdk: Module, store: Store | undefined, cache: unknown, strict = true, engine
 let role: "probe" | "builder" | "reader" = "probe", allowedCollections = ["probe"], semanticCollections = ["probe"];
 let active: { id: string; controller: AbortController } | undefined;
 let requestStats: Stats | undefined;
+let modelErrors: Record<string, unknown> = {};
 const send = (message: unknown) => { if (process.connected) process.send?.(message); };
 const string = (v: unknown): string => { if (typeof v !== "string") throw new DsearchError("INVALID_REQUEST"); return v; };
 const object = (v: unknown): Record<string, unknown> => {
@@ -51,6 +52,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
   const method = string(payload.method);
   if (method === "open") {
     if (store) throw new DsearchError("BUSY", "One store per process");
+    modelErrors = payload.modelErrors ? object(payload.modelErrors) : {};
     const root = string(payload.engineRoot);
     engineRoot = root;
     sdk = await import(pathToFileURL(join(root, "dist/index.js")).href) as Module;
@@ -155,38 +157,46 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
         const request = EngineSearchRequest.parse(args);
         if (request.collections.some(id => !allowedCollections.includes(id))) throw new DsearchError("SCOPE_DENIED");
         const filter = request.filter ? compileFilter(request.filter) : undefined;
-        const line = request.query.replace(/\s+/g, " ");
+        const line = request.query.replace(/\s+/g, " "), lexical = request.lexical_query ?? line;
         const search = async (mode: string, rerank: boolean) => {
+          // Expansion is absent from this validated profile. Never invoke an implicit downloader.
+          if (mode === 'deep') throw Object.assign(new DsearchError('MODEL_NOT_INSTALLED'), { reason: 'EXPANSION_MODEL_NOT_INSTALLED' });
+          if (mode !== 'lexical' && modelErrors.embed) throw new DsearchError(modelErrors.embed === 'MODEL_NOT_INSTALLED' ? 'MODEL_NOT_INSTALLED' : 'MODEL_UNAVAILABLE');
+          if (rerank && modelErrors.rerank) throw Object.assign(new DsearchError('RERANK_UNAVAILABLE'), { reason: modelErrors.rerank === 'MODEL_NOT_INSTALLED' ? 'RERANK_MODEL_NOT_INSTALLED' : 'RERANK_MODEL_UNAVAILABLE' });
           const values = mode === "lexical"
-          ? await current.searchLex(line, { collection: request.collections, limit: request.limit, filter })
-          : await current.search({ ...(mode === "deep" ? { query: line } : { queries: [{ type: "lex", query: line }, { type: "vec", query: line }] }),
+          ? await current.searchLex(lexical, { collection: request.collections, limit: request.limit, filter })
+          : await current.search({ ...(mode === "deep" ? { query: line } : { queries: [{ type: "lex", query: lexical }, { type: "vec", query: line }] }),
             collections: request.collections, filter, rerank, candidateLimit: request.candidate_limit, limit: request.limit, minScore: 0,
             explain: true, chunkStrategy: "regex" });
           if (strict && mode === "lexical") stats.actualCandidates = values.length;
+          const explains = values.map(v => v.explain as { rrf?: { contributions?: { source: string }[] } } | undefined);
+          stats.lexicalContributors = mode === 'lexical' ? values.length : explains.filter(e => e?.rrf?.contributions?.some(c => c.source === 'fts')).length;
+          stats.vectorContributors = mode === 'lexical' ? 0 : explains.filter(e => e?.rrf?.contributions?.some(c => c.source === 'vec')).length;
+          stats.rerankedCandidates = stats.rerankSucceeded ? Number(stats.actualCandidates ?? 0) : 0;
           return values.map(value => {
             const file = typeof value.file === "string" ? value.file : typeof value.filepath === "string" ? value.filepath : undefined;
             if (!file) throw new DsearchError("COMPATIBILITY_FAILED");
             return role === "reader" ? { file, score: value.score } : { ...value, file };
           });
         };
-        try {
-          const hits = await search(request.mode, request.rerank);
-          return { hits, requested_mode: request.mode, effective_mode: request.mode,
-            rank_stage: request.mode === "lexical" ? "bm25" : stats.rerankSucceeded ? "qmd_reranked_blend" : request.rerank && !strict ? "upstream" : "qmd_rrf",
-            degraded: false };
-        } catch (error) {
-          if (!request.allow_degraded || request.mode === "lexical" || signal.aborted) throw error;
-          const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-          if (!["RERANK_UNAVAILABLE", "MODEL_NOT_INSTALLED", "MODEL_UNAVAILABLE"].includes(String(code))) throw error;
-          stats.fallbackUsed = true;
-          if (code === "RERANK_UNAVAILABLE" || request.mode === "deep") {
-            const mode = request.mode === "deep" ? "hybrid" : request.mode;
-            const hits = await search(mode, code === "RERANK_UNAVAILABLE" ? false : request.rerank);
-            return { hits, requested_mode: request.mode, effective_mode: mode,
-              rank_stage: stats.rerankSucceeded ? "qmd_reranked_blend" : "qmd_rrf", degraded: true, warnings: [code] };
+        let mode = request.mode, rerank = request.rerank;
+        const warnings: string[] = [];
+        for (;;) {
+          // Reset stage evidence before a real retry; failed attempts cannot certify the new ranking.
+          stats.rerankSucceeded = false;
+          try {
+            const hits = await search(mode, rerank);
+            return { hits, requested_mode: request.mode, effective_mode: mode, rank_stage: mode === 'lexical' ? 'bm25' : stats.rerankSucceeded ? 'qmd_reranked_blend' : 'qmd_rrf', degraded: warnings.length > 0, warnings };
+          } catch (error) {
+            if (!request.allow_degraded || mode === 'lexical' || signal.aborted) throw error;
+            const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+            if (!['RERANK_UNAVAILABLE', 'MODEL_NOT_INSTALLED', 'MODEL_UNAVAILABLE'].includes(code)) throw error;
+            warnings.push(error && typeof error === 'object' && 'reason' in error ? String(error.reason) : code);
+            stats.fallbackUsed = true;
+            if (mode === 'deep') mode = 'hybrid';
+            else if (code === 'RERANK_UNAVAILABLE') rerank = false;
+            else { mode = 'lexical';rerank = false; }
           }
-          const hits = await search("lexical", false);
-          return { hits, requested_mode: request.mode, effective_mode: "lexical", rank_stage: "bm25", degraded: true, warnings: [code] };
         }
       }
       default: throw new DsearchError("INVALID_REQUEST");

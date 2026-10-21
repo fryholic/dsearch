@@ -26,9 +26,16 @@ export class QmdWorker {
     const embed = registry.models.find(m => m.role === options.embedRole);
     const rerank = registry.models.find(m => m.role === "rerank");
     if (!embed || !rerank) throw new DsearchError("COMPATIBILITY_FAILED");
-    for (const model of [embed, rerank]) await verifyModel(join(options.modelRoot, model.filename), model);
+    const modelErrors: Record<string, string | null> = {};
+    for (const [key, model] of [['embed', embed], ['rerank', rerank]] as const) {
+      try { await verifyModel(join(options.modelRoot, model.filename), model);modelErrors[key] = null; }
+      catch (error) {
+        if (options.role !== 'reader' && !(options.role === 'builder' && key === 'rerank')) throw error;
+        modelErrors[key] = error instanceof DsearchError ? error.code : 'MODEL_UNAVAILABLE';
+      }
+    }
     const result = await this.process.invoke({ method: "open", ...options,
-      embedModel: join(options.modelRoot, embed.filename), rerankModel: join(options.modelRoot, rerank.filename) });
+      modelErrors, embedModel: join(options.modelRoot, embed.filename), rerankModel: join(options.modelRoot, rerank.filename) });
     this.opened = true; return result;
   }
   invoke<T>(method: string, args: unknown = {}, options: Parameters<EngineProcess["invoke"]>[1] = {}): Promise<T> {

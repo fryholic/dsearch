@@ -101,3 +101,8 @@ test('literal byte, deadline and entry budgets preserve unvisited identities and
  const complete=await catalog.reconcile(col.collection_id,{...options,budget:{...options.budget,maxTotalBytes:100}});assert.equal(complete.read_bytes,7);assert.equal(complete.counts.unsupported_encoding,1);
  const doc=current(catalog,col.collection_id).find(d=>d.relative_path==='a.md');const eof=await catalog.read({...request(doc),locator:{kind:'markdown',start:{line:1,column_utf16:0},end:{line:2,column_utf16:0}}});assert.equal(eof.text,'# A');
 });
+
+test('v2 product state migrates scan completeness without altering existing source identity',async t=>{
+ const {state,folder,root,catalog,put}=await fixture(t);await put('one.md','# one');const col=await catalog.addCollection({name:'migration',root});await catalog.reconcile(col.collection_id);const id=current(catalog,col.collection_id)[0].doc_id;state.db.exec('DROP TABLE collection_scans; PRAGMA user_version=2;');
+ const reopened=await StateStore.open(join(folder,'data'));try{const migrated=new Catalog(reopened);assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version,3);assert.equal(migrated.scanStatus(col.collection_id).status,'unscanned');assert.equal(current(migrated,col.collection_id)[0].doc_id,id);await migrated.reconcile(col.collection_id);assert.equal(migrated.scanStatus(col.collection_id).status,'complete');}finally{reopened.close();}
+});

@@ -110,3 +110,5 @@ export class EngineProcess {
     return this.closing;
   }
 }
+
+export { HeavyLane } from './heavy-lane.js';

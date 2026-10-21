@@ -26,6 +26,13 @@ export class Catalog {
     const row = this.state.db.prepare("SELECT * FROM collections WHERE collection_id=?").get(id) as Collection | undefined;
     if (!row) throw new DsearchError("NOT_FOUND"); return row;
   }
+  scanStatus(id: string) {
+    const c = this.collection(id), row = this.state.db.prepare("SELECT * FROM collection_scans WHERE collection_id=? AND scope_fp=?").get(id, c.scope_fp);
+    return { status: !row ? 'unscanned' as const : row.incomplete ? 'incomplete' as const : 'complete' as const, incomplete_boundaries: row ? (JSON.parse(String(row.boundaries_json)) as Boundary[]).filter(b => b.incomplete).length : 0, checked_at: row ? String(row.checked_at) : null };
+  }
+  private recordScan(id: string, scopeFp: string, boundaries: Boundary[]): void {
+    this.state.db.prepare("INSERT INTO collection_scans VALUES (?,?,?,?,?) ON CONFLICT(collection_id) DO UPDATE SET scope_fp=excluded.scope_fp,incomplete=excluded.incomplete,boundaries_json=excluded.boundaries_json,checked_at=excluded.checked_at").run(id, scopeFp, Number(boundaries.some(b => b.incomplete)), canonicalJSON(boundaries), now());
+  }
   async addCollection(input: unknown): Promise<Collection> {
     const parsed = CollectionRequest.safeParse(input); if (!parsed.success) throw new DsearchError("INVALID_REQUEST");
     const request = parsed.data;let root: string, key: string;
@@ -153,10 +160,14 @@ export class Catalog {
         const revision = this.state.db.prepare("INSERT OR IGNORE INTO source_revisions VALUES (?,?,?,?,?,?,?)");
         for (const value of revisions) revision.run(value.revisionId, value.docId, value.source.rawSha256, value.source.textSha256, value.source.bytes, canonicalJSON(value.source.metadata), now());
       });
+      if (!options.budget) this.recordScan(id, collection.scope_fp, boundaries);
       const documents = this.documents(id), counts: Record<string, number> = {};
       for (const doc of documents) counts[doc.eligibility] = (counts[doc.eligibility] ?? 0) + 1;
       const captured = options.captureSources ? observations.flatMap((o, i) => o.source && o.eligibility === "eligible" ? [{ document: rows[i]!, source: o.source }] : []) : undefined;
       return { collection_id: id, source_seq: this.state.sourceSeq, scope_incomplete: boundaries.some(b => b.incomplete), counts, boundaries, documents, read_bytes: readBytes, skipped_files: skipped, stop_reason: stopReason, ...(captured ? { captured_sources: captured } : {}) };
+    } catch (e) {
+      if (!options.budget && e instanceof DsearchError && ['SCOPE_INCOMPLETE', 'SCOPE_DENIED'].includes(e.code)) this.recordScan(id, this.collection(id).scope_fp, [{ path: '', eligibility: 'unreadable', reason: e.code.toLowerCase(), incomplete: true }]);
+      throw e;
     } finally { this.scanning.delete(id); }
   }
   async readDocument(docId: string, expectedRevision: string): Promise<Source & { document: SourceDocument; collection: Collection }> {

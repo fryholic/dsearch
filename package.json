@@ -27,7 +27,9 @@
     "test:r0": "pnpm build && node --test --test-concurrency=1 tests/r0/*.test.mjs",
     "r0:inspect": "pnpm build && node scripts/r0-inspect.mjs",
     "r0:benchmark": "pnpm build && node scripts/r0-benchmark.mjs",
-    "r0:verify": "node scripts/r0-verify.mjs"
+    "r0:verify": "node scripts/r0-verify.mjs",
+    "p4:evaluate": "pnpm build && node scripts/p4-evaluate.mjs",
+    "p4:verify": "node scripts/p4-verify.mjs"
   },
   "devDependencies": {
     "@types/node": "24.10.1",

@@ -68,7 +68,7 @@ export const SearchRequest = z.strictObject({
 }).refine(v => v.mode !== "lexical" || !v.rerank, "Lexical search cannot rerank");
 export type SearchRequest = z.infer<typeof SearchRequest>;
 // Product requests stay at 50 documents; the internal engine may return 80 passages for grouping.
-export const EngineSearchRequest = SearchRequest.safeExtend({ limit: z.number().int().min(1).max(80), collections: z.array(Identifier).min(1).max(64).refine(v => new Set(v).size === v.length), query: z.string().min(1).max(32768).refine(v => new TextEncoder().encode(v).byteLength <= 32768) });
+export const EngineSearchRequest = SearchRequest.safeExtend({ lexical_query: z.string().min(1).max(32768).optional(), limit: z.number().int().min(1).max(80), collections: z.array(Identifier).min(1).max(64).refine(v => new Set(v).size === v.length), query: z.string().min(1).max(32768).refine(v => new TextEncoder().encode(v).byteLength <= 32768) });
 export const LiteralRequest = z.strictObject({ query: z.string().min(1).max(1024), collections,
   ignore_case: z.boolean().default(false), limit: z.number().int().min(1).max(200).default(200) });
 export type LiteralRequest = z.infer<typeof LiteralRequest>;
@@ -77,6 +77,10 @@ export const ReadRequest = DocumentRef.extend({ locator: Locator,
   context_before_lines: z.number().int().min(0).max(100).default(0),
   context_after_lines: z.number().int().min(0).max(100).default(0),
   max_lines: z.number().int().min(1).max(200).default(200) });
+export const RelatedRequest = z.strictObject({ source: DocumentRef.extend({ locator: Locator }), collections, mode: Mode, rerank: z.boolean(), allow_degraded: z.boolean().default(false), limit: z.number().int().min(1).max(50).default(10), candidate_limit: z.number().int().min(1).max(80).default(40), expected_epoch: z.number().int().positive().nullable().optional() }).refine(v => v.mode !== 'lexical' || !v.rerank);
+export type RelatedRequest = z.infer<typeof RelatedRequest>;
+export const CompareRequest = z.strictObject({ left: DocumentRef, right: DocumentRef, query: z.string().trim().min(1).max(8192).refine(v => new TextEncoder().encode(v).length <= 8192), mode: Mode, rerank: z.boolean(), allow_degraded: z.boolean().default(false), candidate_limit: z.number().int().min(1).max(80).default(40), expected_epoch: z.number().int().positive().nullable().optional() }).refine(v => v.left.doc_id !== v.right.doc_id && (v.mode !== 'lexical' || !v.rerank));
+export type CompareRequest = z.infer<typeof CompareRequest>;
 export const CollectionRequest = z.strictObject({
   name: z.string().trim().min(1).max(80), root: z.string().min(1).max(4096),
   preset: z.enum(["general", "learning"]).default("general"),

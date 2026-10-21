@@ -9,7 +9,7 @@ export async function r0Fingerprint(){
    if(['node_modules','dist','dist-web'].includes(entry.name))continue;
    const file=join(path,entry.name);
    if(entry.isDirectory())await visit(file);
-   else if(entry.isFile()&&/\.(?:ts|tsx|mjs|json|yaml|patch|css)$/.test(file))files.push(file);
+   else if(entry.isFile()&&/\.(?:ts|tsx|mjs|json|yaml|patch|css|html)$/.test(file))files.push(file);
   }
  }
  for(const name of ['apps','packages','scripts','tests','fixtures','vendor'])await visit(join(root,name));

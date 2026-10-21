@@ -20,7 +20,8 @@ export type Reader = {
 };
 type Entry = {
     snapshot: Snapshot;
-    ready: Promise<Reader>;
+    ready?: Promise<Reader>;
+    lastUsed: number;
     refs: number;
     tail: Promise<void>;
     worker?: QmdWorker;
@@ -41,11 +42,14 @@ export class ReaderPool {
     private readonly entries = new Map<string, Entry>();
     private closing = false;
     private readonly closings = new Set<Promise<void>>();
+    private readonly idleTimer: ReturnType<typeof setInterval>;
     constructor(readonly catalog: Catalog, readonly options: {
         engineRoot: string;
         modelRoot: string;
         profile_fp?: string;
-    }) { }
+        idleMs?: number;
+    }) { this.idleTimer = setInterval(() => this.sweep(), Math.min(options.idleMs ?? 300000, 30000));this.idleTimer.unref(); }
+    get residentWorkers(): number { return [...this.entries.values()].filter(e => e.worker && e.worker.process.state !== 'stopped').length; }
     active(): Snapshot {
         const value = this.catalog.state.db.prepare("SELECT a.generation_id,a.epoch,g.profile_fp,g.directory_path,g.manifest_sha256 FROM active_slot a JOIN generations g ON g.generation_id=a.generation_id WHERE a.slot=1 AND g.state='active'").get() as Snapshot | undefined;
         if (!value)
@@ -61,16 +65,14 @@ export class ReaderPool {
         this.sweep();
         let entry = this.entries.get(snapshot.generation_id);
         if (!entry || entry.worker?.process.state === 'stopped') {
-            entry = { snapshot, refs: 0, tail: Promise.resolve(), retired: false, ready: undefined! };
-            const created = entry;
-            entry.ready = this.load(snapshot, created);
-            void entry.ready.catch(() => { created.retired = true; this.dispose(created); });
+            entry = { snapshot, refs: 0, tail: Promise.resolve(), retired: false, lastUsed: Date.now() };
             this.entries.set(snapshot.generation_id, entry);
         }
         entry.refs++;
         const held = entry;
         let released = false;
-        return { snapshot, ready: held.ready, run: async <T>(method: string, args: unknown, options: {
+        const pool = this;
+        return { snapshot, get ready() { return pool.ensure(held); }, run: async <T>(method: string, args: unknown, options: {
                 signal?: AbortSignal;
                 onProgress?: (p: Progress) => void;
             } = {}) => {
@@ -81,7 +83,7 @@ export class ReaderPool {
                     await prior;
                     if (options.signal?.aborted)
                         throw new DsearchError('CANCELLED');
-                    const reader = await held.ready;
+                    const reader = await this.ensure(held);
                     if (options.signal?.aborted)
                         throw new DsearchError('CANCELLED');
                     return await reader.worker.invoke<EngineResponse<T>>(method, args, options);
@@ -90,7 +92,20 @@ export class ReaderPool {
                     unlock();
                 }
             }, release: () => { if (released)
-                return; released = true; held.refs--; this.sweep(); this.dispose(held); } };
+                return; released = true; held.refs--; held.lastUsed = Date.now(); this.sweep(); this.dispose(held); } };
+    }
+    private ensure(entry: Entry): Promise<Reader> {
+        if (!entry.ready) {
+            entry.ready = this.load(entry.snapshot, entry);
+            void entry.ready.catch(() => { entry.retired = true; this.dispose(entry); });
+        }
+        return entry.ready;
+    }
+    /** Called only while holding the shared native lane; leases keep generation files, not resident models. */
+    async unloadExcept(generationId?: string): Promise<void> {
+        for (const entry of this.entries.values()) if (entry.snapshot.generation_id !== generationId && entry.ready) {
+            await entry.tail;await entry.ready.then(reader => reader.worker.close(), () => {});delete entry.ready;delete entry.worker;
+        }
     }
     private async load(snapshot: Snapshot, entry: Entry): Promise<Reader> {
         const root = join(this.catalog.state.root, 'generations', snapshot.generation_id);
@@ -102,6 +117,8 @@ export class ReaderPool {
         if (manifest.generation_id !== snapshot.generation_id || manifest.profile_fp !== snapshot.profile_fp)
             throw new DsearchError('COMPATIBILITY_FAILED');
         const json = async (name: string) => JSON.parse(await readFile(join(root, name), 'utf8'));
+        const recorded = await json('catalog.json');
+        if (!Array.isArray(recorded.boundaries) || recorded.boundaries.some((b: { scope_incomplete: boolean }) => b.scope_incomplete)) throw new DsearchError('SCOPE_INCOMPLETE');
         const profile = ProfileManifest.parse(await json('profile.json'));
         if (digest(canonicalJSON(profile)) !== snapshot.profile_fp)
             throw new DsearchError('COMPATIBILITY_FAILED');
@@ -136,7 +153,7 @@ export class ReaderPool {
     sweep(): void {
         const active = this.catalog.state.db.prepare('SELECT generation_id FROM active_slot WHERE slot=1').get()?.generation_id;
         for (const entry of this.entries.values()) {
-            entry.retired ||= entry.snapshot.generation_id !== active || entry.worker?.process.state === 'stopped';
+            entry.retired ||= entry.snapshot.generation_id !== active || entry.worker?.process.state === 'stopped' || (!entry.refs && Date.now() - entry.lastUsed >= (this.options.idleMs ?? 300000));
             this.dispose(entry);
         }
     }
@@ -146,10 +163,10 @@ export class ReaderPool {
         entry.disposing = true;
         if (this.entries.get(entry.snapshot.generation_id) === entry)
             this.entries.delete(entry.snapshot.generation_id);
-        const closing = entry.ready.then(reader => reader.worker.close(), () => { }).catch(() => { });
+        const closing = (entry.ready ?? Promise.reject()).then(reader => reader.worker.close(), () => { }).catch(() => { });
         this.closings.add(closing);
         void closing.finally(() => this.closings.delete(closing));
     }
-    async close(): Promise<void> { this.closing = true; const entries = [...this.entries.values()]; this.entries.clear(); await Promise.allSettled(entries.map(e => e.ready.then(r => r.worker.close(), () => { }))); while (this.closings.size)
+    async close(): Promise<void> { this.closing = true; clearInterval(this.idleTimer); const entries = [...this.entries.values()]; this.entries.clear(); await Promise.allSettled(entries.map(e => e.ready?.then(r => r.worker.close(), () => { }))); while (this.closings.size)
         await Promise.allSettled([...this.closings]); }
 }

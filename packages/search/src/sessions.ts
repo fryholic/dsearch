@@ -1,5 +1,6 @@
+import { HeavyLane } from '@dsearch/runtime';
 import { randomUUID } from 'node:crypto';
-import { DsearchError, ErrorCode, SearchRequest, LiteralRequest } from '@dsearch/contracts';
+import { DsearchError, ErrorCode, SearchRequest, RelatedRequest, CompareRequest, LiteralRequest } from '@dsearch/contracts';
 import { SearchStatus, type SearchComplete } from '@dsearch/contracts/search';
 import type { ReaderPool, ReadLease } from './readers.js';
 import type { SourceSearch } from './source-search.js';
@@ -25,10 +26,12 @@ export class SearchSessions {
         maxSessions?: number;
         maxBytes?: number;
         now?: () => number;
+        lane?: HeavyLane;
     } = {}) {
         this.timer = setInterval(() => this.sweep(), 30000);
         this.timer.unref();
     }
+    get queuedCount(): number { return [...this.values.values()].filter(s => s.status.state === 'queued').length; }
     private now(): number { return this.settings.now?.() ?? Date.now(); }
     private admit(): void {
         this.sweep();
@@ -46,12 +49,23 @@ export class SearchSessions {
         if (!parsed.success)
             throw new DsearchError('INVALID_REQUEST');
         const request = parsed.data;
-        if (request.mode !== 'lexical' || request.rerank)
-            throw new DsearchError('INVALID_REQUEST', 'This alpha supports lexical and literal search');
         this.source.validateCollections(request.collections);
         this.admit();
         const lease = this.readers.reserve(request.expected_epoch);
         return this.enqueue(request.collections, (id, signal, progress) => this.source.keyword(request, id, lease, signal, progress), lease);
+    }
+    createRelated(input: unknown) {
+        const parsed = RelatedRequest.safeParse(input);if (!parsed.success) throw new DsearchError('INVALID_REQUEST');const request = parsed.data;
+        const sourceScope = this.source.catalog.document(request.source.doc_id).collection_id;
+        const scopes = [...new Set([...request.collections, sourceScope])];this.source.validateCollections(scopes);this.admit();
+        const lease = this.readers.reserve(request.expected_epoch);
+        return this.enqueue(scopes, (id, signal, progress) => this.source.related(request, id, lease, signal, progress), lease);
+    }
+    createCompare(input: unknown) {
+        const parsed = CompareRequest.safeParse(input);if (!parsed.success) throw new DsearchError('INVALID_REQUEST');const request = parsed.data;
+        const scopes = [...new Set([request.left, request.right].map(ref => this.source.catalog.document(ref.doc_id).collection_id))];this.source.validateCollections(scopes);this.admit();
+        const lease = this.readers.reserve(request.expected_epoch);
+        return this.enqueue(scopes, (id, signal, progress) => this.source.compare(request, id, lease, signal, progress), lease);
     }
     createLiteral(input: unknown) { const parsed = LiteralRequest.safeParse(input); if (!parsed.success)
         throw new DsearchError('INVALID_REQUEST'); const request = parsed.data; this.source.validateCollections(request.collections); this.admit(); return this.enqueue(request.collections, (id, signal, progress) => this.source.literal(request, id, signal, progress)); }
@@ -61,16 +75,24 @@ export class SearchSessions {
     }) => void) => Promise<SearchComplete>, lease?: ReadLease) {
         const id = randomUUID(), session: Session = { id, scopes, status: { search_id: id, state: 'queued', phase: 'queued' }, controller: new AbortController(), lastAccess: this.now(), running: false, expired: false, bytes: 128, listeners: new Set(), ...(lease ? { lease } : {}) };
         this.values.set(id, session);
+        const acceptedAt = performance.now();
         const task = this.tail.then(async () => {
             if (session.controller.signal.aborted || session.expired)
                 return;
             session.running = true;
             this.update(session, { search_id: id, state: 'running', phase: lease ? 'loading' : 'literal-scanning' });
             try {
-                const result = await operation(id, session.controller.signal, event => { if (!session.controller.signal.aborted)
-                    this.update(session, { search_id: id, state: 'running', phase: event.phase, completed: event.completed }); });
+                let queueMs = 0;
+                const execute = async () => {
+                    queueMs = performance.now() - acceptedAt;
+                    if (lease && this.readers.unloadExcept) await this.readers.unloadExcept(lease.snapshot.generation_id);
+                    return operation(id, session.controller.signal, event => { if (!session.controller.signal.aborted) this.update(session, { search_id: id, state: 'running', phase: event.phase, completed: event.completed }); });
+                };
+                if (this.settings.lane?.busy) this.update(session, { search_id: id, state: 'running', phase: 'waiting-model' });
+                const result = this.settings.lane ? await this.settings.lane.run(session.controller.signal, execute) : await execute();
                 if (session.controller.signal.aborted)
                     throw new DsearchError('CANCELLED');
+                if (result.purpose !== 'compare' && result.effective_mode !== 'literal') { result.telemetry.queue_ms = queueMs;result.telemetry.total_ms = performance.now() - acceptedAt; }
                 this.update(session, result);
             }
             catch (e) {
@@ -103,6 +125,7 @@ export class SearchSessions {
     get(id: string): SearchStatus { this.sweep(); const session = this.values.get(id); if (!session)
         throw new DsearchError('RESULT_EXPIRED'); session.lastAccess = this.now(); return session.status; }
     cancel(id: string): SearchStatus {
+        this.sweep();
         const session = this.values.get(id);
         if (!session)
             throw new DsearchError('RESULT_EXPIRED');

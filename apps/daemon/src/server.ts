@@ -1,3 +1,4 @@
+import { HeavyLane } from '@dsearch/runtime';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFile, lstat, realpath, rm } from 'node:fs/promises';
@@ -13,7 +14,7 @@ import { CollectionInfo, CollectionPatch, JobInfo, AppStatus, ReadResponse } fro
 import { LocalAuth } from './auth.js';
 import { privateRoot, takeOwnership } from './owner.js';
 const workspace = fileURLToPath(new URL('../../../', import.meta.url));
-const statuses: Partial<Record<ErrorCode, number>> = { INVALID_REQUEST: 422, INVALID_QUERY: 422, UNSUPPORTED_LOCATOR: 422, UNAUTHORIZED: 401, SCOPE_DENIED: 403, NO_ACTIVE_GENERATION: 409, STALE_REVISION: 409, STALE_EPOCH: 409, RESULT_EXPIRED: 410, INPUT_TOO_LARGE: 413, MODEL_NOT_INSTALLED: 503, MODEL_UNAVAILABLE: 503, BUSY: 503, SERVICE_UNAVAILABLE: 503, CANCELLED: 409, NOT_FOUND: 404, SOURCE_PENDING: 409, SOURCE_TOO_LARGE: 413, INVALID_LOCATOR: 422 };
+const statuses: Partial<Record<ErrorCode, number>> = { INVALID_REQUEST: 422, INVALID_QUERY: 422, UNSUPPORTED_LOCATOR: 422, UNAUTHORIZED: 401, SCOPE_DENIED: 403, NO_ACTIVE_GENERATION: 409, STALE_REVISION: 409, STALE_EPOCH: 409, RESULT_EXPIRED: 410, INPUT_TOO_LARGE: 413, MODEL_NOT_INSTALLED: 503, MODEL_UNAVAILABLE: 503, BUSY: 503, SERVICE_UNAVAILABLE: 503, CANCELLED: 409, NOT_FOUND: 404, SOURCE_PENDING: 409, SOURCE_TOO_LARGE: 413, SCOPE_INCOMPLETE: 409, RERANK_UNAVAILABLE: 503, INPUT_TOO_LONG: 422, INVALID_LOCATOR: 422 };
 const envelope = (data: unknown, requestId: string) => ({ schema_version: API_VERSION, request_id: requestId, ok: true, data });
 function json(res: ServerResponse, status: number, value: unknown) { if (res.destroyed || res.writableEnded)
     return; res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); }
@@ -81,7 +82,11 @@ export async function createApplication(options: ApplicationOptions = {}) {
         state = await StateStore.open(root);
         const catalog = new Catalog(state), engineRoot = options.engineRoot ?? join(workspace, '.local/qmd-upstream'), modelRoot = options.modelRoot ?? join(workspace, '.local/models');
         const profile = options.profile ? ProfileManifest.parse(options.profile) : (await createAlphaProfile(engineRoot)).manifest, profileFp = digest(canonicalJSON(profile));
-        const builder = new GenerationBuilder(catalog, { engineRoot, modelRoot, profile, embedRole: profile.models.embed.dimension === 1024 ? 'embed' : 'reference' }), readers = new ReaderPool(catalog, { engineRoot, modelRoot, profile_fp: profileFp }), sessions = new SearchSessions(new SourceSearch(catalog), readers);
+        const lane = new HeavyLane();
+        let readers: ReaderPool;
+        const builder = new GenerationBuilder(catalog, { engineRoot, modelRoot, profile, embedRole: profile.models.embed.dimension === 1024 ? 'embed' : 'reference', lane, beforeWork: () => readers.unloadExcept() });
+        readers = new ReaderPool(catalog, { engineRoot, modelRoot, profile_fp: profileFp });
+        const sessions = new SearchSessions(new SourceSearch(catalog), readers, { lane });
         stopWorkers = async () => { await Promise.allSettled([builder.close(), sessions.close()]); };
         auth = await LocalAuth.open(root, instance, options.now);
         const authentication = auth, store = state, staticFiles = await assets(options.webRoot ?? join(workspace, 'apps/web/dist-web'));
@@ -89,7 +94,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
         const streams = new Set<ServerResponse>(), inflight = new Set<Promise<void>>();
         const collectionInfo = (id: string) => { const c = catalog.collection(id), policy = JSON.parse(c.scope_json), counts: Record<string, number> = {}; for (const doc of catalog.documents(id))
             if (doc.present)
-                counts[doc.eligibility] = (counts[doc.eligibility] ?? 0) + 1; return CollectionInfo.parse({ collection_id: c.collection_id, name: c.name, root_path: c.root_path, enabled: !!c.enabled, preset: policy.preset, include: policy.include, exclude: policy.exclude, scope_fp: c.scope_fp, coverage: counts }); };
+                counts[doc.eligibility] = (counts[doc.eligibility] ?? 0) + 1; return CollectionInfo.parse({ collection_id: c.collection_id, name: c.name, root_path: c.root_path, enabled: !!c.enabled, preset: policy.preset, include: policy.include, exclude: policy.exclude, scope_fp: c.scope_fp, coverage: counts, scope: catalog.scanStatus(id) }); };
         const jobInfo = (id: string) => { const job = builder.getJob(id); return JobInfo.parse({ job_id: job.job_id, generation_id: job.generation_id, state: job.state, phase: job.phase, progress: job.progress, error_code: job.error_code, updated_at: job.updated_at }); };
         const status = () => {
             const generation = store.db.prepare("SELECT a.generation_id,a.epoch,g.profile_fp,g.source_seq,g.coverage_json FROM active_slot a JOIN generations g ON g.generation_id=a.generation_id WHERE a.slot=1 AND g.state='active'").get();
@@ -98,7 +103,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 for (const doc of JSON.parse(String(generation.coverage_json)))
                     coverage[doc.state] = (coverage[doc.state] ?? 0) + 1;
             const profileState = store.db.prepare('SELECT status FROM profiles WHERE profile_id=?').get(profile.profile_id)?.status ?? 'draft';
-            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, busy: builder.busy, needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, modes: { lexical: !!generation && generation.profile_fp === profileFp, literal: true }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
+            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, busy: builder.busy, scope_incomplete: catalog.listCollections().some(c => c.enabled && catalog.scanStatus(c.collection_id).status === 'incomplete'), needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, modes: { lexical: !!generation && generation.profile_fp === profileFp, hybrid: !!generation && generation.profile_fp === profileFp, deep: false, literal: true }, execution: { heavy_concurrency: 1, heavy_busy: lane.busy, queued_requests: lane.queued + sessions.queuedCount, resident_workers: readers.residentWorkers, idle_shutdown_seconds: 300 }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
         };
         const requireOrigin = (req: IncomingMessage) => { if (req.headers.origin !== origin || (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin'))
             throw new DsearchError('SCOPE_DENIED'); };
@@ -191,6 +196,8 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 json(res, 202, envelope(sessions.createKeyword(await body(req)), requestId));
                 return;
             }
+            if (path === '/v1/related-searches' && req.method === 'POST') { json(res, 202, envelope(sessions.createRelated(await body(req)), requestId));return; }
+            if (path === '/v1/comparisons' && req.method === 'POST') { json(res, 202, envelope(sessions.createCompare(await body(req)), requestId));return; }
             if (path === '/v1/literal-searches' && req.method === 'POST') {
                 json(res, 202, envelope(sessions.createLiteral(await body(req)), requestId));
                 return;
