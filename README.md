@@ -92,7 +92,7 @@ pnpm dsearch model prepare qwen-local --wait --json
 pnpm dsearch reconcile
 ```
 
-`model prepare`는 모델을 다운로드·검증하고, `reconcile`은 등록된 활성 컬렉션의 색인을 만듭니다. 문서를 수정하거나 추가한 뒤에도 `reconcile`로 검색 색인을 갱신합니다.
+`model prepare`는 모델을 다운로드·검증하고, `reconcile`은 등록된 활성 컬렉션의 색인을 만듭니다. 문서를 수정·추가하거나 컬렉션 범위를 변경한 뒤에도 `reconcile`로 검색 색인을 갱신합니다.
 
 ### 키워드와 정확한 문자열 검색
 
@@ -264,7 +264,7 @@ pnpm check
 주요 디렉터리는 다음과 같습니다.
 
 ```text
-apps/       로컬 서비스, CLI, 웹 GUI, MCP 클라이언트 연결
+apps/       로컬 서비스, CLI, 웹 GUI, MCP 서버
 packages/   문서 관리, 검색 엔진 연결, 공통 UI와 요청·응답 정의
 scripts/    준비·빌드·검사 도구
 tests/      자동 검사
