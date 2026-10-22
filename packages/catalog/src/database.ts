@@ -23,11 +23,14 @@ export class StateStore {
         if (count !== 0) throw new DsearchError("COMPATIBILITY_FAILED");
         db.exec("BEGIN IMMEDIATE");
         try { db.exec(STATE_SCHEMA); db.exec("COMMIT"); } catch (e) { db.exec("ROLLBACK"); throw e; }
-      } else if (version === 2) {
+      } else if (version === 2 || version === 3) {
         db.exec("BEGIN IMMEDIATE");
-        try { db.exec("CREATE TABLE collection_scans (collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),scope_fp TEXT NOT NULL,incomplete INTEGER NOT NULL CHECK(incomplete IN (0,1)),boundaries_json TEXT NOT NULL,checked_at TEXT NOT NULL); PRAGMA user_version=3;"); db.exec("COMMIT"); }
-        catch (e) { db.exec("ROLLBACK"); throw e; }
-      } else if (version !== 3) throw new DsearchError("COMPATIBILITY_FAILED");
+        try {
+          if (version === 2) db.exec("CREATE TABLE collection_scans (collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),scope_fp TEXT NOT NULL,incomplete INTEGER NOT NULL CHECK(incomplete IN (0,1)),boundaries_json TEXT NOT NULL,checked_at TEXT NOT NULL);");
+          db.exec("CREATE TABLE IF NOT EXISTS collection_registrations (collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),removed INTEGER NOT NULL CHECK(removed IN (0,1)),previous_name TEXT NOT NULL,detached_at TEXT); PRAGMA user_version=4;");
+          db.exec("COMMIT");
+        } catch (e) { db.exec("ROLLBACK"); throw e; }
+      } else if (version !== 4) throw new DsearchError("COMPATIBILITY_FAILED");
       db.prepare("SELECT eligibility_reason FROM source_documents LIMIT 0").all();
       const meta = db.prepare("SELECT source_seq FROM catalog_meta WHERE slot=1").get();
       if (!meta || !Number.isSafeInteger(meta.source_seq) || Number(meta.source_seq) < 0) throw new DsearchError("COMPATIBILITY_FAILED");

@@ -12,10 +12,17 @@ test('initial CLI owns lifecycle and shares actual HTTP IDs, revisions, locators
   const added=await cli(data,['collection','add',sources,'--name','CLI 문서']);assert.equal(added.code,0);const id=added.packet.data.collection_id;
   const token=(await readFile(join(data,'credentials/device-token'),'utf8')).trim(),runtime=JSON.parse(await readFile(join(data,'runtime.json'),'utf8'));
   const http=async(method,path,value)=>{const response=await fetch(runtime.url+path,{method,headers:{authorization:'Bearer '+token,'content-type':'application/json'},...(value?{body:JSON.stringify(value)}:{})});return response.json();};
+  const preview=await cli(data,['collection','preview',sources,'--name','preview']);assert.equal(preview.code,0);assert.equal(preview.packet.data.counts.eligible,1);assert.equal((await cli(data,['collection','list'])).packet.data.length,1);
+  const modelList=await cli(data,['model','list']);assert.equal(modelList.code,0);assert.equal(modelList.packet.data.length,3);
+  const modelCheck=await cli(data,['model','check','qwen-local','--wait']);assert.equal(modelCheck.code,0,modelCheck.err);assert.equal(modelCheck.packet.data.kind,'model-check');
+  const profileList=await cli(data,['profile','list']);assert.equal(profileList.code,0);assert.equal(profileList.packet.data.profiles.length,2);
   const prefs=await cli(data,['settings','get']);assert.equal(prefs.code,0);assert.equal(prefs.packet.data.search.rerank,false);
   const saved=await cli(data,['settings','set','--theme','dark','--mode','lexical']);assert.equal(saved.code,0);assert.equal(saved.packet.data.theme,'dark');
+  const tuned=await cli(data,['settings','set','--candidate-limit','12','--allow-degraded']);assert.equal(tuned.code,0);assert.equal(tuned.packet.data.search.candidate_limit,12);assert.equal(tuned.packet.data.search.allow_degraded,true);
+  const restored=await cli(data,['settings','set','--candidate-limit','40','--no-degraded']);assert.equal(restored.code,0);assert.equal(restored.packet.data.search.allow_degraded,false);
   const diagnostic=await cli(data,['doctor']);assert.equal(diagnostic.code,0);assert.ok(!JSON.stringify(diagnostic.packet.data).includes(sources));
   const built=await cli(data,['reconcile']);assert.equal(built.code,0,built.err);assert.equal(built.packet.data.state,'succeeded');assert.ok(built.err.length);
+  const generations=await cli(data,['generation','list']);assert.equal(generations.code,0);assert.equal(generations.packet.data[0].state,'active');
   const found=await cli(data,['search','서명','--collection',id,'--mode','lexical']);assert.equal(found.code,0,found.err);const result=found.packet.data.results[0];assert.ok(result);
   const exported=join(folder,'export.json');const exportRun=await cli(data,['export',found.packet.data.search_id,'--output',exported]);assert.equal(exportRun.code,0);const exportData=JSON.parse(await readFile(exported,'utf8'));assert.equal(exportData.includes_query,false);assert.equal(exportData.data.query_plan,undefined);
   const coverage=await cli(data,['collection','coverage',id]);assert.equal(coverage.code,0);assert.equal(coverage.packet.data.total,1);

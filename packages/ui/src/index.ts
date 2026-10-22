@@ -1,2 +1,1 @@
-// Workspace boundary for packages/ui. Runtime implementation is pending.
-export {};
+export { Button, Notice, Empty, Dialog, SplitPane } from './components.js';

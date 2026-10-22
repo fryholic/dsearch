@@ -29,7 +29,8 @@
     "r0:benchmark": "pnpm build && node scripts/r0-benchmark.mjs",
     "r0:verify": "node scripts/r0-verify.mjs",
     "p4:evaluate": "pnpm build && node scripts/p4-evaluate.mjs",
-    "p4:verify": "node scripts/p4-verify.mjs"
+    "p4:verify": "node scripts/p4-verify.mjs",
+    "p5:verify": "node scripts/p5-verify.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

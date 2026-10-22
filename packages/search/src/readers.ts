@@ -47,6 +47,7 @@ export class ReaderPool {
         engineRoot: string;
         modelRoot: string;
         profile_fp?: string;
+        acceptProfile?: (fingerprint: string) => boolean;
         idleMs?: number;
     }) { this.idleTimer = setInterval(() => this.sweep(), Math.min(options.idleMs ?? 300000, 30000));this.idleTimer.unref(); }
     get residentWorkers(): number { return [...this.entries.values()].filter(e => e.worker && e.worker.process.state !== 'stopped').length; }
@@ -60,6 +61,7 @@ export class ReaderPool {
         if (this.closing)
             throw new DsearchError('SERVICE_UNAVAILABLE');
         const snapshot = this.active();
+        if (this.options.acceptProfile && !this.options.acceptProfile(snapshot.profile_fp)) throw new DsearchError('NO_ACTIVE_GENERATION');
         if (expectedEpoch != null && expectedEpoch !== snapshot.epoch)
             throw new DsearchError('STALE_EPOCH');
         this.sweep();

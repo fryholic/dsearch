@@ -11,5 +11,8 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "react": "19.2.0"
   }
 }

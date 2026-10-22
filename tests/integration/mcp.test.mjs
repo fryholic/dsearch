@@ -7,7 +7,7 @@ const packet=data=>({schema_version:1,request_id:'request',ok:true,data});
 async function linked(call,options){const bridge=createMcpServer(call,options),client=new Client({name:'test',version:'1'}),[a,b]=InMemoryTransport.createLinkedPair();await bridge.server.connect(b);await client.connect(a);return{bridge,client,close:async()=>{bridge.abort();await client.close();await bridge.server.close();}};}
 test('MCP publishes strict read-only schemas and rejects unknown fields before daemon access',async()=>{
  let calls=0;const c=await linked(async()=>{calls++;return packet({});});
- try{const list=await c.client.listTools();assert.equal(list.tools.length,7);for(const t of list.tools){assert.equal(t.inputSchema.additionalProperties,false);assert.equal(t.annotations.readOnlyHint,true);assert.equal(t.annotations.destructiveHint,false);}
+ try{const list=await c.client.listTools();assert.equal(list.tools.length,8);for(const t of list.tools){assert.equal(t.inputSchema.additionalProperties,false);assert.equal(t.annotations.readOnlyHint,true);assert.equal(t.annotations.destructiveHint,false);}
   const invalid=await c.client.callTool({name:'search_documents',arguments:{query:'key',collection_ids:['scope'],unknown:true}});assert.equal(invalid.isError,true);assert.equal(calls,0);
   assert.ok(!list.tools.some(t=>/sync|export|write|model|activate/.test(t.name)));
  }finally{await c.close();}

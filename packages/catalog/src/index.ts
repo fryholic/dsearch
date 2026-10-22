@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readdir, lstat, realpath } from "node:fs/promises";
+import { readdir, lstat, realpath, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve, matchesGlob } from "node:path";
 import { CollectionRequest, ReadRequest, DsearchError } from "@dsearch/contracts";
+import { CollectionPatch } from '@dsearch/contracts/control';
 import { StateStore } from "./database.js";
 import { canonicalJSON, digest, within, pathEligibility, metadataEligibility, type ScopePolicy, type Eligibility } from "./policy.js";
 import { fileKey, checkRoot, readStableSource } from "./files.js";
@@ -20,8 +21,8 @@ const now = () => new Date().toISOString();
 /** Filesystem discovery precedes a short synchronous product-state transaction. */
 export class Catalog {
   private readonly scanning = new Set<string>();
-  constructor(readonly state: StateStore) {}
-  listCollections(): Collection[] { return this.state.db.prepare("SELECT * FROM collections ORDER BY name,collection_id").all() as Collection[]; }
+  constructor(readonly state: StateStore, private readonly excludedDataRoot = state.root) {}
+  listCollections(): Collection[] { return this.state.db.prepare("SELECT c.* FROM collections c LEFT JOIN collection_registrations r USING(collection_id) WHERE COALESCE(r.removed,0)=0 ORDER BY name,collection_id").all() as Collection[]; }
   collection(id: string): Collection {
     const row = this.state.db.prepare("SELECT * FROM collections WHERE collection_id=?").get(id) as Collection | undefined;
     if (!row) throw new DsearchError("NOT_FOUND"); return row;
@@ -38,29 +39,46 @@ export class Catalog {
     const request = parsed.data;let root: string, key: string;
     try {
       root = await realpath(resolve(request.root));const info = await lstat(root, { bigint: true });
-      if (!info.isDirectory() || within(this.state.root, root)) throw new Error("Invalid source root");key = fileKey(info);
+      if (!info.isDirectory() || within(this.excludedDataRoot, root)) throw new Error("Invalid source root");key = fileKey(info);
     } catch { throw new DsearchError("SCOPE_DENIED"); }
     const policy: ScopePolicy = { preset: request.preset, include: request.include, exclude: request.exclude, root_file_key: key };
-    const scope = canonicalJSON(policy), id = randomUUID();
+    const scope = canonicalJSON(policy);
+    const detached = this.state.db.prepare('SELECT c.* FROM collections c JOIN collection_registrations r USING(collection_id) WHERE c.root_path=? AND r.removed=1 ORDER BY r.detached_at DESC').all(root) as Collection[];
+    const prior = detached.find(c => (JSON.parse(c.scope_json) as ScopePolicy).root_file_key === key), id = prior?.collection_id ?? randomUUID();
     if (this.listCollections().some(c => c.name === request.name || c.root_path === root)) throw new DsearchError("INVALID_REQUEST");
-    this.state.transaction(() => { this.state.db.prepare("INSERT INTO collections VALUES (?,?,?,?,?,1,?)").run(id, request.name, root, scope, digest(scope), now());this.state.advance(); });
+    this.state.transaction(() => { if (prior) { this.state.db.prepare('UPDATE collections SET name=?,scope_json=?,scope_fp=?,enabled=1 WHERE collection_id=?').run(request.name, scope, digest(scope), id);this.state.db.prepare('DELETE FROM collection_registrations WHERE collection_id=?').run(id); }
+      else this.state.db.prepare("INSERT INTO collections VALUES (?,?,?,?,?,1,?)").run(id, request.name, root, scope, digest(scope), now());this.state.advance(); });
     return this.collection(id);
   }
-  setEnabled(id: string, enabled: boolean): void {
-    this.collection(id);this.state.transaction(() => { this.state.db.prepare("UPDATE collections SET enabled=? WHERE collection_id=?").run(Number(enabled), id);this.state.advance(); });
+  private requireRegistered(id: string): Collection {
+    const collection = this.collection(id);
+    if (this.state.db.prepare('SELECT removed FROM collection_registrations WHERE collection_id=?').get(id)?.removed) throw new DsearchError('SCOPE_DENIED');
+    return collection;
   }
-  rename(id: string, name: string): void {
-    this.collection(id);const parsed = CollectionRequest.shape.name.safeParse(name);
-    if (!parsed.success || this.listCollections().some(c => c.collection_id !== id && c.name === parsed.data)) throw new DsearchError('INVALID_REQUEST');
-    this.state.db.prepare('UPDATE collections SET name=? WHERE collection_id=?').run(parsed.data, id);
+  patch(id: string, input: unknown): Collection {
+    const row = this.requireRegistered(id), patch = CollectionPatch.safeParse(input);if (!patch.success) throw new DsearchError('INVALID_REQUEST');
+    const prior = JSON.parse(row.scope_json) as ScopePolicy, { name = row.name, enabled = !!row.enabled, ...scopePatch } = patch.data;
+    const parsed = CollectionRequest.safeParse({ name, root: row.root_path, preset: prior.preset, include: prior.include, exclude: prior.exclude, ...scopePatch });
+    if (!parsed.success || this.listCollections().some(c => c.collection_id !== id && c.name === name)) throw new DsearchError('INVALID_REQUEST');
+    const policy: ScopePolicy = { preset: parsed.data.preset, include: parsed.data.include, exclude: parsed.data.exclude, root_file_key: prior.root_file_key }, scope = canonicalJSON(policy);
+    this.state.transaction(() => { this.state.db.prepare('UPDATE collections SET name=?,enabled=?,scope_json=?,scope_fp=? WHERE collection_id=?').run(parsed.data.name, Number(enabled), scope, digest(scope), id);if (scope !== row.scope_json || Number(enabled) !== row.enabled) this.state.advance(); });
+    return this.collection(id);
   }
-  setScope(id: string, input: unknown): void {
-    const row = this.collection(id), previous = JSON.parse(row.scope_json) as ScopePolicy;
-    const parsed = CollectionRequest.safeParse({ name: row.name, root: row.root_path, preset: previous.preset, include: previous.include, exclude: previous.exclude, ...(input as object) });
-    if (!parsed.success || parsed.data.root !== row.root_path || parsed.data.name !== row.name) throw new DsearchError("INVALID_REQUEST");
-    const policy: ScopePolicy = { preset: parsed.data.preset, include: parsed.data.include, exclude: parsed.data.exclude, root_file_key: previous.root_file_key };
-    const scope = canonicalJSON(policy);
-    this.state.transaction(() => { this.state.db.prepare("UPDATE collections SET scope_json=?,scope_fp=? WHERE collection_id=?").run(scope, digest(scope), id);this.state.advance(); });
+  setEnabled(id: string, enabled: boolean): void { this.patch(id, { enabled }); }
+  rename(id: string, name: string): void { this.patch(id, { name }); }
+  setScope(id: string, input: unknown): void { this.patch(id, input); }
+  unregister(id: string): void {
+    const row = this.collection(id);if (this.state.db.prepare('SELECT removed FROM collection_registrations WHERE collection_id=?').get(id)?.removed) return;
+    this.state.transaction(() => { this.state.db.prepare('INSERT INTO collection_registrations VALUES (?,1,?,?) ON CONFLICT(collection_id) DO UPDATE SET removed=1,previous_name=excluded.previous_name,detached_at=excluded.detached_at').run(id, row.name, now());this.state.db.prepare('UPDATE collections SET enabled=0,name=? WHERE collection_id=?').run(id + '-removed', id);this.state.advance(); });
+  }
+  async preview(input: unknown) {
+    const parsed = CollectionRequest.safeParse(input);if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
+    const base = join(this.state.root, 'previews');await mkdir(base, { recursive: true, mode: 0o700 });
+    const folder = await mkdtemp(join(base, 'scope-'));let store: StateStore | undefined;
+    try { store = await StateStore.open(folder);const catalog = new Catalog(store, this.excludedDataRoot), col = await catalog.addCollection(parsed.data);
+      const report = await catalog.reconcile(col.collection_id, { maxEntries: 10000, budget: { maxBytesPerFile: 2 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024, deadline: Date.now() + 5000 } });
+      return { counts: report.counts, partial: !!report.stop_reason, stop_reason: report.stop_reason, scope_incomplete: report.scope_incomplete, read_bytes: report.read_bytes, sample: report.documents.slice(0, 30).map(d => ({ relative_path: d.relative_path, eligibility: d.eligibility, reason: d.eligibility_reason })) };
+    } finally { store?.close();await rm(folder, { recursive: true, force: true }); }
   }
   documents(collectionId?: string): SourceDocument[] {
     return (collectionId ? this.state.db.prepare("SELECT * FROM source_documents WHERE collection_id=? ORDER BY relative_path,doc_id").all(collectionId)
@@ -100,7 +118,7 @@ export class Catalog {
           if (info.isDirectory()) {
             const hidden = child.split("/").some(x => x.startsWith(".") || x === "node_modules");
             const excluded = policy.exclude.some(glob => glob.endsWith("/**") && matchesGlob(child, glob.slice(0, -3)));
-            const product = within(this.state.root, full), source = policy.preset === "learning" && child.split("/").includes("Sources");
+            const product = within(this.excludedDataRoot, full), source = policy.preset === "learning" && child.split("/").includes("Sources");
             if (hidden || excluded || product || source) boundaries.push({ path: child, eligibility: source ? "excluded_source" : "excluded_pattern", reason: product ? "product_data" : hidden ? "hidden_or_dependency_path" : source ? "source_directory" : "exclude_pattern", incomplete: false });
             else await walk(child, depth + 1);
             continue;
@@ -177,7 +195,7 @@ export class Catalog {
   }
   async readDocument(docId: string, expectedRevision: string): Promise<Source & { document: SourceDocument; collection: Collection }> {
     const doc = this.document(docId), collection = this.collection(doc.collection_id), policy = JSON.parse(collection.scope_json) as ScopePolicy;
-    if (within(this.state.root, join(collection.root_path, doc.relative_path))) throw new DsearchError("SCOPE_DENIED");
+    if (within(this.excludedDataRoot, join(collection.root_path, doc.relative_path))) throw new DsearchError("SCOPE_DENIED");
     if (!collection.enabled || !doc.present || doc.eligibility !== "eligible" || pathEligibility(doc.relative_path, policy).eligibility !== "eligible") throw new DsearchError("SCOPE_DENIED");
     if (!doc.latest_revision_id || doc.latest_revision_id !== expectedRevision) throw new DsearchError("STALE_REVISION");
     const source = await readStableSource(collection.root_path, doc.relative_path, policy);

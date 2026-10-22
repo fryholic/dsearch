@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { DsearchError, Identifier, SearchRequest, RelatedRequest, CompareRequest, ReadRequest } from '@dsearch/contracts';
+import { DsearchError, Identifier, SearchRequest, RelatedRequest, CompareRequest, ReadRequest, LiteralRequest } from '@dsearch/contracts';
 import { SearchStatus } from '@dsearch/contracts/search';
 import { AppStatus, CollectionInfo, ReadResponse } from '@dsearch/contracts/control';
 import { connect, startDaemon, type Packet } from '@dsearch/runtime';
@@ -31,7 +31,7 @@ export function boundedResult(packet: Packet) {
   }
   if (omitted) {
     for (const group of data.purpose === 'compare' ? [data.left.result, data.right.result] : [data]) {
-      if (group.results) { group.counts.returned_documents = group.results.length;group.has_more = true; }
+      if (group.results) { group.counts.returned_documents = group.results.length;group.has_more = true; }if (group.matches) group.counts.matches = group.matches.length;
     }
     result.structuredContent.transport = { truncated: true, returned_count: lists().reduce((sum, list) => sum + list.length, 0), has_more: true,
       next_read_hint: 'Read document IDs with the same revision and a smaller locator; narrow the search scope to retrieve omitted candidates.' };
@@ -73,6 +73,8 @@ export function createMcpServer(call: DaemonCall, options: { timeoutMs?: number 
   server.registerTool('search_documents', { description: 'Search registered documents, then verify evidence with read_document. ' + note,
     annotations, inputSchema: z.strictObject({ query: shape.query, collection_ids: shape.collections, mode: shape.mode.default('hybrid'), rerank: shape.rerank.default(false), limit: shape.limit, candidate_limit: shape.candidate_limit, allow_degraded: shape.allow_degraded, expected_epoch: shape.expected_epoch, filter: shape.filter, wait: z.boolean().default(true) }) },
     (input, extra) => execute(async signal => { const { collection_ids, wait: waitForResult, ...rest } = input;const packet = await call('POST', '/v1/searches', SearchRequest.parse({ ...rest, purpose: 'find', collections: collection_ids }));return waitForResult ? wait(packet, signal) : packet; }, extra.signal));
+  server.registerTool('search_literal', { description: 'Find exact source strings without regex interpretation. ' + note, annotations, inputSchema: z.strictObject({ query: LiteralRequest.shape.query, collection_ids: LiteralRequest.shape.collections, ignore_case: LiteralRequest.shape.ignore_case, limit: LiteralRequest.shape.limit }) },
+    (input, extra) => execute(async signal => { const { collection_ids, ...rest } = input;return wait(await call('POST', '/v1/literal-searches', LiteralRequest.parse({ ...rest, collections: collection_ids })), signal); }, extra.signal));
   server.registerTool('read_document', { description: 'Read bounded original Markdown using the exact revision and locator from search. ' + note, annotations, inputSchema: ReadRequest },
     (input, extra) => execute(async () => { const packet = await call('POST', '/v1/documents/read', ReadRequest.parse(input));ReadResponse.parse(packet.data);return packet; }, extra.signal));
   server.registerTool('find_related', { description: 'Find related evidence for a selected source passage; excludes that document. ' + note, annotations, inputSchema: RelatedRequest },

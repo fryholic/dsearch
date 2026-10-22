@@ -38,5 +38,10 @@ test('management HTTP routes retain auth, private diagnostics and collection cov
  const coverage=(await api('POST','/v1/collections/'+col.collection_id+'/coverage',{})).packet.data;assert.equal(coverage.total,1);assert.equal(coverage.documents[0].relative_path,'private-title.md');
  const diag=JSON.stringify((await api('POST','/v1/diagnostics',{})).packet.data);for(const sentinel of [source,'private-title','private-body','private-collection','private-query',token])assert.ok(!diag.includes(sentinel),sentinel);
  assert.equal((await fetch(app.url+'/settings')).status,200);assert.equal((await fetch(app.url+'/diagnostics')).status,200);
+ const jobsBefore=app.status().jobs.length;
+ for(const invalid of [{expected_epoch:0,generation_id:'conflicting-id'},{expected_epoch:0,extra:true},{},null,[]]){
+  const rejected=await api('POST','/v1/generations/unknown-generation/rollback',invalid);assert.equal(rejected.status,422);assert.equal(rejected.packet.error.code,'INVALID_REQUEST');
+ }
+ assert.equal(app.status().jobs.length,jobsBefore);
  }finally{await app.close();}
 });

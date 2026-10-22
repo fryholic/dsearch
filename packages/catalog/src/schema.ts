@@ -1,5 +1,5 @@
 export const STATE_SCHEMA = String.raw`
--- schema: state-v3
+-- schema: state-v4
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE collections (
@@ -18,6 +18,13 @@ CREATE TABLE collection_scans (
   incomplete INTEGER NOT NULL CHECK(incomplete IN (0,1)),
   boundaries_json TEXT NOT NULL,
   checked_at TEXT NOT NULL
+);
+
+CREATE TABLE collection_registrations (
+  collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),
+  removed INTEGER NOT NULL CHECK(removed IN (0,1)),
+  previous_name TEXT NOT NULL,
+  detached_at TEXT
 );
 
 CREATE TABLE source_documents (
@@ -172,5 +179,5 @@ CREATE TABLE evaluation_runs (
 
 CREATE TABLE catalog_meta (slot INTEGER PRIMARY KEY CHECK(slot=1), source_seq INTEGER NOT NULL CHECK(source_seq>=0));
 INSERT INTO catalog_meta VALUES (1,0);
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 `;

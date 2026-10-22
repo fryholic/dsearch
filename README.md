@@ -30,11 +30,14 @@ dsearch는 [QMD](https://github.com/tobi/qmd)를 검색 엔진으로 사용하�
 - **정확한 문자열 검색** — 식별자·코드·기호를 정규식 해석 없이 검색합니다.
 - **원문 근거 확인** — 문서별 검색 근거와 줄 위치, 앞뒤 문맥을 확인합니다.
 - **변경 감지** — 읽기 전에 원문 revision을 대조하고 오래된 결과의 재읽기를 거부합니다.
-- **CLI와 GUI** — 같은 로컬 API와 문서·위치 계약을 사용합니다.
+- **CLI·GUI·MCP** — 같은 로컬 API와 문서·위치 계약을 사용합니다.
 - **컬렉션 관리** — 폴더 등록, 검색 범위 선택, 사용 중지와 수동 색인을 지원합니다.
+- **모델·프로필 관리** — 명시적 모델 준비와 검증, 별도 후보 색인 준비 후 전환·복귀를 지원합니다.
+- **원문 수식** — 안전한 Markdown과 MathML로 수식을 읽고 TeX 원문으로 전환할 수 있습니다.
+- **운영 화면** — 작업 취소·재시도, 테마·검색 기본값, 진단과 결과 내보내기를 제공합니다.
 - **로컬 처리** — 검색어와 검색 결과는 메모리 세션으로 관리합니다.
 
-전체 운영 GUI·자동 동기화·Obsidian 연동은 [로드맵](#roadmap)에 포함되어 있습니다.
+자동 동기화·운영 복구·설치 패키지·Obsidian 연동은 [로드맵](#roadmap)에 포함되어 있습니다.
 
 ## Requirements
 
@@ -59,21 +62,22 @@ pnpm local:setup
 # 프로젝트 의존성 설치
 pnpm install --frozen-lockfile --ignore-scripts
 
-# 고정된 QMD 엔진과 로컬 모델 준비
-pnpm r0:prepare
+# 고정된 QMD 엔진 준비
+pnpm engine:prepare
 
 # 웹 GUI 열기 — 서비스가 없으면 자동 시작
 pnpm dsearch ui
 ```
 
-`r0:prepare`는 QMD 소스를 준비하고 허용된 네이티브 의존성을 빌드한 뒤, 모델 registry에 지정된 GGUF 파일 약 **1.61GB**를 내려받아 크기와 SHA-256을 확인합니다. 의존성·빌드 캐시·문서 색인은 추가 공간을 사용합니다. 모델 준비 이후 검색 도중 모델을 자동 다운로드하지 않습니다.
+`engine:prepare`는 고정 QMD 소스와 허용된 네이티브 의존성을 준비합니다. 모델은 GUI의 **검색 준비**에서 명시적으로 다운로드·검증합니다. Qwen 프로필의 두 파일은 약 **1.28GB**이고, 비교용 모델까지 준비하는 개발 명령 `pnpm r0:prepare`는 약 **1.61GB**를 사용합니다. 의존성·빌드 캐시·문서 색인은 추가 공간을 사용합니다. 일반 검색 중에는 모델을 자동 다운로드하지 않습니다.
 
 GUI에서 다음 순서로 시작하세요.
 
-1. **폴더 등록**에서 기존 Markdown 폴더의 절대 경로를 입력합니다.
-2. **수동 색인 시작**을 누르고 작업 완료를 확인합니다.
-3. **문서 검색**에서 키워드·의미 검색 또는 정확한 문자열을 검색합니다. 의미 검색에서는 리랭킹을 선택할 수 있습니다.
-4. 결과를 선택해 원문과 앞뒤 문맥을 읽습니다.
+1. **검색 준비**에서 기존 Markdown 폴더의 절대 경로와 이름을 입력합니다.
+2. **범위 미리보기**로 포함·제외 이유를 확인한 뒤 **폴더 등록**을 누릅니다.
+3. **다운로드 및 검증**을 실행합니다. 기존 파일은 SHA-256을 확인하며 새로 내려받지 않습니다.
+4. **색인 만들고 검색 준비**가 완료되면 **문서 검색 시작**으로 이동합니다.
+5. 키워드·의미·정확한 문자열을 검색하고 결과를 선택해 원문과 앞뒤 문맥을 읽습니다.
 
 일반 컬렉션은 `.md`와 `.markdown` 파일을 포함합니다. 숨김 폴더·`node_modules`·symlink·제품 데이터 폴더는 기본 검색 범위에서 제외합니다.
 
@@ -106,7 +110,7 @@ pnpm dsearch search "인증서" --collection COLLECTION_ID --json
 
 ```sh
 # 의미 검색 + 리랭킹 (명시적으로 활성화)
-pnpm dsearch search "두 장치가 비밀을 보내지 않고 같은 키 자료를 얻는 방법" --mode hybrid --json
+pnpm dsearch search "두 장치가 비밀을 보내지 않고 같은 키 자료를 얻는 방법" --mode hybrid --rerank --json
 
 # 리랭킹 없이 키워드·벡터 후보를 결합
 pnpm dsearch search "공개키의 신뢰 조건" --mode hybrid --no-rerank --json
@@ -179,6 +183,25 @@ printf '%s\n' '인증서 갱신' |
 
 주요 종료 코드는 성공 `0`, 입력 오류 `2`, 인증·범위 오류 `3`, 서비스·색인 준비 오류 `4`, 오래된 revision·만료된 결과 `5`, 모델·호환성 등 기타 오류 `6`, 취소 완료 `130`입니다.
 
+### MCP와 운영 인터페이스
+
+`pnpm dsearch mcp`는 같은 로컬 daemon에 연결하는 stdio 서버입니다. 검색·정확한 문자열·읽기·관련 자료·비교·상태·컬렉션 ID 조회·검색 취소를 제공하며 관리 명령과 원문 쓰기는 제공하지 않습니다. MCP stdout에는 프로토콜 메시지만 출력하고, 문서 본문은 신뢰할 수 없는 자료로 표시합니다. 결과는 64KiB 안에서 반환하며 생략이 있으면 후속 읽기 안내를 제공합니다.
+
+```sh
+pnpm dsearch settings get --json
+pnpm dsearch settings set --theme light --mode hybrid --no-rerank
+pnpm dsearch doctor --json
+pnpm dsearch collection coverage COLLECTION_ID --json
+pnpm dsearch jobs list --json
+pnpm dsearch model list --json
+pnpm dsearch model prepare qmd-reference --wait --json
+pnpm dsearch profile prepare qmd-reference --wait --json
+pnpm dsearch profile activate qmd-reference --generation GENERATION_ID --json
+pnpm dsearch export SEARCH_ID --output results.json
+```
+
+결과 내보내기는 기본적으로 질의를 제외합니다. `--include-query`를 명시하면 질의 계획도 포함합니다. CLI는 기존 파일을 덮어쓰지 않습니다. GUI에는 검색 준비·문서 검색·관련 자료·문서 비교·컬렉션·작업·설정·진단의 8개 메뉴가 있으며, 검색 조건과 읽던 원문·비교 대상은 메뉴 전환 중 메모리에서 유지합니다.
+
 ## Configuration
 
 ### 데이터 디렉터리
@@ -190,6 +213,8 @@ printf '%s\n' '인증서 갱신' |
 ```
 
 별도 실험 환경은 `--data-root`로 분리할 수 있습니다. 같은 환경을 사용하는 명령에는 동일한 경로를 지정하세요.
+
+`--data-root`는 카탈로그·색인·설정을 분리합니다. 기본 설치 모델은 프로젝트의 `.local/models/`에서 공유합니다.
 
 ```sh
 pnpm dsearch ui --data-root .local/dev-data
@@ -220,7 +245,9 @@ QMD 소스·패치·모델 파일의 식별자는 아래 파일에서 관리합�
 - [호환 패치](vendor/qmd-patches/compat-v1.patch)
 - [모델 registry](vendor/models/registry.json)
 
-현재 모델 구성은 Qwen3-Embedding-0.6B, Qwen3-Reranker-0.6B, 비교용 EmbeddingGemma-300M입니다. 제품에서 Qwen 임베딩과 리랭킹을 사용하며, 비교용 EmbeddingGemma도 같은 생산 검색 파이프라인으로 평가합니다. 모델 선택의 전체 설정 화면은 후속 단계입니다.
+현재 모델 구성은 Qwen3-Embedding-0.6B, Qwen3-Reranker-0.6B, 비교용 EmbeddingGemma-300M입니다. 모델의 기본 저장 위치는 프로젝트의 `.local/models/`입니다. GUI의 **설정 → 검색 모델과 프로필**에서 파일명·저장소·revision·SHA-256·크기·검증 상태를 확인합니다.
+
+프로필을 선택하는 것만으로 현재 검색은 바뀌지 않습니다. 필요한 파일을 검증하고 **이 프로필의 새 색인 준비**를 실행한 뒤 **검증 후 전환**을 누릅니다. 이전 세대는 원문·범위·프로필이 여전히 호환될 때 같은 검증으로 복귀할 수 있습니다. 원문이 변경되었거나 세대가 호환되지 않으면 기존 활성 세대를 유지하고 전환을 거부합니다.
 
 ## Data and privacy
 
@@ -239,7 +266,7 @@ CLI 출력을 파일로 저장하는 경우 해당 파일은 사용자가 관리
 현재는 기능과 운영 경계를 검증하는 알파 단계입니다.
 
 - 색인은 수동 전체 재구축 방식입니다. 자동 동기화·증분 색인·강제 종료 후 복구·세대 자동 정리는 후속 작업입니다.
-- GUI의 폴더 등록은 절대 경로 입력 방식이며, 수식은 원래 TeX 표기로 표시합니다.
+- GUI의 폴더 등록은 절대 경로 입력 방식입니다. 수식은 안전한 MathML로 표시하며 지원하지 않거나 한도를 넘는 식은 TeX 원문으로 표시합니다.
 - 정확한 문자열 검색은 기본 파일당 8MiB, 요청당 총 128MiB·5초·200개 일치까지 처리합니다. 한도에 도달하면 부분 결과와 중단 이유를 반환합니다. 시간 한도는 파일 작업 사이에서 확인합니다.
 - 원문 읽기는 최대 200행·64KiB입니다. 검색 세션은 최근 접근 기준 15분, 최대 50개·총 64MiB로 제한합니다.
 - 의미 검색은 가까운 구간을 순위로 반환하며, 답이 없는 질의의 자동 판정은 제공하지 않습니다. 실제 관련성은 원문에서 확인해야 합니다.
@@ -266,12 +293,15 @@ pnpm check
 ```sh
 pnpm test:r0
 pnpm p4:verify
+pnpm p5:verify
 
 # 조정 20질의 × 두 임베딩 × 세 검색 구성 비교
 pnpm p4:evaluate
 ```
 
 `p4:verify`는 소스 fingerprint를 고정하고 일반·보안·native 시험과 생산 검색 파이프라인의 비교 평가를 실행합니다. manifest·로그·평가는 `artifacts/p4/`에 저장합니다. 합성 조정 자료의 결과이며 고정 40질의와 R1 출시 성능 판정은 포함하지 않습니다.
+
+`p5:verify`는 일반·보안·native 검사와 같은 source fingerprint·웹 빌드의 브라우저 근거를 대조합니다. 먼저 실제 GUI 시나리오를 검증해 로컬 `artifacts/p5/browser/checks.json`을 준비해야 하며, 이 파일이 없으면 통과하지 않습니다. 개인 문서와 로컬 검증 근거는 배포 소스에 포함하지 않습니다.
 
 엔진 비교 실험은 다음 명령으로 실행합니다.
 
@@ -301,7 +331,7 @@ packages/
 ├── search/       검색, 문서별 집계, 메모리 세션
 ├── generations/  색인 세대 구축·검증·게시
 ├── runtime/      worker와 모델 무결성 관리
-├── ui/           디자인 토큰
+├── ui/           디자인 토큰과 공통 컴포넌트
 └── evaluation/   검색 품질 평가
 scripts/          준비·빌드·검증 도구
 tests/            계약·통합·보안·native 시험
@@ -322,8 +352,8 @@ vendor/           upstream manifest, 패치, 모델 registry, 라이선스
 - [x] 원문 기반 관련 검색과 독립 revision 비교
 - [x] 두 임베딩·세 검색 구성의 합성 조정 평가
 - [ ] 대표 자료의 검색 품질·지연·메모리 비교
-- [x] MCP 검색·읽기·관련·비교·상태·취소 도구
-- [ ] 전체 GUI·CLI 확장과 모델 준비 흐름
+- [x] MCP 검색·리터럴·읽기·관련·비교·상태·범위 조회·취소 도구
+- [x] 전체 알파 GUI·CLI 확장과 모델 준비·프로필 전환 흐름
 - [ ] 자동 동기화, 증분 갱신, 복구·백업·세대 정리
 - [ ] 설치 패키지와 운영 검증
 - [ ] Obsidian 연결 검토·확정 링크 연동
@@ -345,24 +375,11 @@ vendor/           upstream manifest, 패치, 모델 registry, 라이선스
 
 이 프로젝트는 [MIT License](LICENSE)로 배포합니다.
 
-QMD의 MIT 라이선스 고지는 [vendor/licenses/QMD-LICENSE](vendor/licenses/QMD-LICENSE)에 보관합니다. 그 밖의 의존성과 모델에는 각 배포본의 라이선스가 적용됩니다.
+QMD·KaTeX·MCP SDK의 MIT 라이선스 고지는 [vendor/licenses](vendor/licenses)에 보관합니다. 그 밖의 의존성과 모델에는 각 배포본의 라이선스가 적용됩니다.
 
 ## Acknowledgements
 
 - [QMD](https://github.com/tobi/qmd) — 검색 엔진 기반
+- [KaTeX](https://github.com/KaTeX/KaTeX) — 안전한 MathML 수식 변환
+- [Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk) — MCP stdio 연동
 - Qwen3-Embedding·Qwen3-Reranker·EmbeddingGemma — 로컬 모델과 엔진 비교 시험
-
-### MCP와 운영 인터페이스
-
-`pnpm dsearch mcp`는 같은 로컬 daemon에 연결하는 stdio 서버입니다. 검색·읽기·관련 자료·비교·상태·컬렉션 ID 조회·검색 취소를 제공하며 관리 명령과 원문 쓰기는 제공하지 않습니다. MCP stdout에는 프로토콜 메시지만 출력하고, 문서 본문은 신뢰할 수 없는 자료로 표시합니다. 결과는 64KiB 안에서 반환하며 생략이 있으면 후속 읽기 안내를 제공합니다.
-
-```sh
-pnpm dsearch settings get --json
-pnpm dsearch settings set --theme light --mode hybrid --no-rerank
-pnpm dsearch doctor --json
-pnpm dsearch collection coverage COLLECTION_ID --json
-pnpm dsearch jobs list --json
-pnpm dsearch export SEARCH_ID --output results.json
-```
-
-결과 내보내기는 기본적으로 질의를 제외합니다. `--include-query`를 명시하면 질의 계획도 포함합니다. 기존 파일은 덮어쓰지 않습니다. 설정·진단과 컬렉션 범위 편집은 GUI에서도 사용할 수 있습니다. 초기 등록·모델 준비, 관련 자료·비교 전용 화면과 전체 반응형 검증은 P5의 남은 작업입니다.

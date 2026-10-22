@@ -4,6 +4,7 @@ import parse from 'remark-parse';
 import gfm from 'remark-gfm';
 import math from 'remark-math';
 import frontmatter from 'remark-frontmatter';
+import { renderToString } from 'katex';
 type Node = {
     type: string;
     value?: string;
@@ -23,9 +24,9 @@ catch {
     return null;
 } };
 /** Render an allowlist of AST nodes as React text. HTML, images, embeds and unsafe URLs never execute. */
-function nodes(items: Node[] = []): ReactNode[] {
+function nodes(items: Node[] = [], budget = { formulas: 0 }): ReactNode[] {
     return items.map((node, key) => {
-        const children = nodes(node.children);
+        const children = nodes(node.children, budget);
         switch (node.type) {
             case 'text': return node.value;
             case 'paragraph': return <p key={key}>{children}</p>;
@@ -36,12 +37,17 @@ function nodes(items: Node[] = []): ReactNode[] {
             case 'emphasis': return <em key={key}>{children}</em>;
             case 'strong': return <strong key={key}>{children}</strong>;
             case 'delete': return <del key={key}>{children}</del>;
-            case 'inlineCode':
-            case 'inlineMath': return <code key={key}>{node.value}</code>;
+            case 'inlineCode': return <code key={key}>{node.value}</code>;
+            case 'inlineMath':
+            case 'math': {
+                if (++budget.formulas > 32 || (node.value?.length ?? 0) > 8000) return <code key={key} className="formula">{node.value}</code>;
+                try { const markup = renderToString(node.value ?? '', { output: 'mathml', displayMode: node.type === 'math', trust: false, throwOnError: true, strict: 'ignore', maxExpand: 128, maxSize: 10, macros: Object.create(null) });
+                    return <span key={key} className={node.type === 'math' ? 'formula math-display' : 'math-inline'} dangerouslySetInnerHTML={{ __html: markup }}/>;
+                } catch { return <code key={key} className="formula">{node.value}</code>; }
+            }
             case 'code':
-            case 'math':
             case 'yaml':
-            case 'html': return <pre key={key} className={node.type === 'math' ? 'formula' : ''}><code>{node.value}</code></pre>;
+            case 'html': return <pre key={key}><code>{node.value}</code></pre>;
             case 'blockquote': return <blockquote key={key}>{children}</blockquote>;
             case 'list': return node.ordered ? <ol key={key} start={node.start ?? 1}>{children}</ol> : <ul key={key}>{children}</ul>;
             case 'listItem': return <li key={key}>{children}</li>;

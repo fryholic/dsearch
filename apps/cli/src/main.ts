@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { Preferences, CollectionPatch } from '@dsearch/contracts/control';
-import { DsearchError, ErrorCode, ErrorReason, CollectionRequest, SearchRequest, LiteralRequest, ReadRequest, RelatedRequest, CompareRequest } from '@dsearch/contracts';
+import { DsearchError, ErrorCode, ErrorReason, Identifier, MetadataFilter, CollectionRequest, SearchRequest, LiteralRequest, ReadRequest, RelatedRequest, CompareRequest } from '@dsearch/contracts';
 import { SearchStatus } from '@dsearch/contracts/search';
 import { connect, startDaemon, waitForStopped, openUI, defaultRoot, type Packet } from './connection.js';
 const help = `dsearch 0.1 alpha · QMD 2.8.3
@@ -13,6 +13,8 @@ Usage: pnpm dsearch <command> [options]
   ui [--print-url]                    Open the authenticated GUI
   collection add <folder> --name <name> [--preset general|learning]
   collection list
+  collection preview <folder> --name <name> [--include <glob>] [--exclude <glob>]
+  collection remove <id>
   collection enable|disable <id>
   reconcile | sync                   Build and publish a complete generation
   search <query> --collection <id> [--mode lexical|hybrid|deep] [--no-rerank] [--allow-degraded] [--limit 10]
@@ -21,10 +23,15 @@ Usage: pnpm dsearch <command> [options]
   related <doc-id> --revision <id> --lines 1:20 [--mode hybrid]
   compare <left-id> <right-id> --left-revision <id> --right-revision <id> --query <text>
   status
-  jobs list|get|cancel [id]
+  model list|check|prepare [profile-id] [--wait]
+  profile list|prepare|build [profile-id] [--wait]
+  profile activate <profile-id> --generation <generation-id> [--expected-epoch N]
+  generation list|rollback [generation-id] [--wait]
+  jobs list|get|cancel|retry [id]
   collection update <id> [--name <name>] [--include <glob>] [--exclude <glob>]
   collection coverage <id>
   settings get|set [--theme system|light|dark] [--mode lexical|hybrid] [--rerank|--no-rerank]
+                  [--candidate-limit N] [--allow-degraded|--no-degraded]
   doctor [--output <file>]
   export <search-id> --output <file> [--include-query]
   open <doc-id> --revision <revision-id>
@@ -79,14 +86,14 @@ function print(packet: Packet) {
         process.stderr.write('Partial literal results: ' + d.stop_reason + '\n');
 }
 try {
-    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, stdin: { type: 'boolean' } } });
+    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
     jsonOutput = !!v.json;
     if (v.help || !p.length) {
         process.stdout.write(help);
         process.exit(0);
     }
     const root = resolve(v['data-root'] ?? defaultRoot()), command = p[0];
-    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp', 'jobs', 'settings', 'doctor', 'export', 'open'].includes(command!))
+    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp', 'jobs', 'settings', 'doctor', 'export', 'open', 'model', 'profile', 'generation'].includes(command!))
         throw new DsearchError('INVALID_REQUEST');
     if (command === 'mcp') {
         if (p.length !== 1 || v.json || v.stdin) throw new DsearchError('INVALID_REQUEST');
@@ -122,10 +129,14 @@ try {
             process.removeListener('SIGINT', interrupt);
         }
     };
+    if (v.wait && v['no-wait']) throw new DsearchError('INVALID_REQUEST');
+    if (v['allow-degraded'] && v['no-degraded']) throw new DsearchError('INVALID_REQUEST');
     if (v.rerank && v['no-rerank']) throw new DsearchError('INVALID_REQUEST');
     const preferences = ['search', 'related', 'compare', 'settings'].includes(command!) ? Preferences.parse((await call('GET', '/v1/settings')).data) : undefined;
     const requestedMode = v.mode ?? preferences?.search.mode ?? 'hybrid';
     const requestedRerank = requestedMode !== 'lexical' && (v.rerank ? true : v['no-rerank'] ? false : preferences?.search.rerank ?? false);
+    const requestedAllowDegraded = v['no-degraded'] ? false : v['allow-degraded'] ?? preferences?.search.allow_degraded ?? false;
+    const candidateLimit = v['candidate-limit'] ? Number(v['candidate-limit']) : preferences?.search.candidate_limit ?? 40;
     let packet: Packet;
     if (['serve', 'daemon'].includes(command!)) {
         if (p[1] === 'stop') {
@@ -149,9 +160,19 @@ try {
             throw new DsearchError('INVALID_REQUEST');
         packet = await call('GET', '/v1/status');
     }
+    else if (command === 'model' || command === 'profile' || command === 'generation') {
+        if (p[1] === 'list' && p.length === 2) { packet = await call('GET', command === 'model' ? '/v1/models' : '/v1/profiles');if (command === 'generation') packet = { ...packet, data: packet.data.generations }; }
+        else if (command === 'model' && ['check', 'prepare'].includes(p[1] ?? '') && p.length === 3 && Identifier.safeParse(p[2]).success) { packet = await call('POST', '/v1/models/' + p[1], { profile_id: p[2] });if (!v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true); }
+        else if (command === 'profile' && ['prepare', 'build'].includes(p[1] ?? '') && p.length === 3 && Identifier.safeParse(p[2]).success) { packet = await call('POST', '/v1/profiles/' + p[2] + '/' + p[1], {});if (!v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true); }
+        else if (((command === 'profile' && p[1] === 'activate' && v.generation) || (command === 'generation' && p[1] === 'rollback')) && p.length === 3 && Identifier.safeParse(p[2]).success) {
+            const expected_epoch = v['expected-epoch'] !== undefined ? Number(v['expected-epoch']) : (await call('GET', '/v1/profiles')).data.active_epoch;if (!Number.isSafeInteger(expected_epoch) || expected_epoch < 0) throw new DsearchError('INVALID_REQUEST');
+            if (command === 'profile' && !Identifier.safeParse(v.generation).success) throw new DsearchError('INVALID_REQUEST');
+            packet = await call('POST', command === 'profile' ? '/v1/profiles/' + p[2] + '/activate' : '/v1/generations/' + p[2] + '/rollback', { ...(command === 'profile' ? { generation_id: v.generation } : {}), expected_epoch });if (!v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true);
+        } else throw new DsearchError('INVALID_REQUEST');
+    }
     else if (command === 'settings') {
         if (p.length !== 2 || !['get', 'set'].includes(p[1]!)) throw new DsearchError('INVALID_REQUEST');
-        packet = p[1] === 'get' ? await call('GET', '/v1/settings') : await call('PUT', '/v1/settings', Preferences.parse({ ...preferences, ...(v.theme ? { theme: v.theme } : {}), search: { ...preferences!.search, mode: requestedMode, rerank: requestedRerank } }));
+        packet = p[1] === 'get' ? await call('GET', '/v1/settings') : await call('PUT', '/v1/settings', Preferences.parse({ ...preferences, ...(v.theme ? { theme: v.theme } : {}), search: { ...preferences!.search, mode: requestedMode, rerank: requestedRerank, allow_degraded: requestedAllowDegraded, candidate_limit: candidateLimit } }));
     }
     else if (command === 'doctor') {
         if (p.length !== 1) throw new DsearchError('INVALID_REQUEST');packet = await call('POST', '/v1/diagnostics', {});
@@ -167,14 +188,15 @@ try {
     }
     else if (command === 'jobs') {
         if (p[1] === 'list' && p.length === 2) { const current = await call('GET', '/v1/status');packet = { ...current, data: current.data.jobs }; }
-        else if (['get', 'cancel'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call(p[1] === 'cancel' ? 'DELETE' : 'GET', '/v1/jobs/' + p[2]);
+        else if (['get', 'cancel', 'retry'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) { packet = await call(p[1] === 'retry' ? 'POST' : p[1] === 'cancel' ? 'DELETE' : 'GET', '/v1/jobs/' + p[2] + (p[1] === 'retry' ? '/retry' : ''), ...(p[1] === 'retry' ? [{}] : []));if (p[1] === 'retry' && !v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true); }
         else throw new DsearchError('INVALID_REQUEST');
     }
     else if (command === 'collection') {
         if (p[1] === 'list' && p.length === 2)
             packet = await call('GET', '/v1/collections');
-        else if (p[1] === 'add' && p.length === 3)
-            packet = await call('POST', '/v1/collections', checked(CollectionRequest, { name: v.name, root: resolve(p[2]!), preset: v.preset ?? 'general' }));
+        else if (['add', 'preview'].includes(p[1] ?? '') && p.length === 3)
+            packet = await call('POST', p[1] === 'preview' ? '/v1/collections/preview' : '/v1/collections', checked(CollectionRequest, { name: v.name, root: resolve(p[2]!), preset: v.preset ?? 'general', ...(v.include ? { include: v.include } : {}), ...(v.exclude ? { exclude: v.exclude } : {}) }));
+        else if (p[1] === 'remove' && p.length === 3 && Identifier.safeParse(p[2]).success) packet = await call('DELETE', '/v1/collections/' + p[2]);
         else if (p[1] === 'update' && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call('PATCH', '/v1/collections/' + p[2], checked(CollectionPatch, { ...(v.name ? { name: v.name } : {}), ...(v.preset ? { preset: v.preset } : {}), ...(v.include ? { include: v.include } : {}), ...(v.exclude ? { exclude: v.exclude } : {}) }));
         else if (p[1] === 'coverage' && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call('POST', '/v1/collections/' + p[2] + '/coverage', {});
         else if (['enable', 'disable'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!))
@@ -190,7 +212,7 @@ try {
             packet = await wait('/v1/jobs/' + packet.data.job_id, true);
     }
     else if (command === 'related' || command === 'compare') {
-        const mode = requestedMode, common = { mode, rerank: requestedRerank, allow_degraded: !!v['allow-degraded'], ...(v['candidate-limit'] ? { candidate_limit: Number(v['candidate-limit']) } : {}) };
+        const mode = requestedMode, common = { mode, rerank: requestedRerank, allow_degraded: requestedAllowDegraded, candidate_limit: candidateLimit };
         if (command === 'related') {
             if (p.length !== 2 || !v.lines || !/^\d+:\d+$/.test(v.lines)) throw new DsearchError('INVALID_REQUEST');
             const [start, end] = v.lines.split(':').map(Number);if (!start || !end || end < start) throw new DsearchError('INVALID_REQUEST');
@@ -219,7 +241,8 @@ try {
             query = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)).replace(/\r?\n$/, '');
         }
         const collections = v.collection ?? (await call('GET', '/v1/collections')).data.filter((c: any) => c.enabled).map((c: any) => c.collection_id);
-        const request = command === 'search' ? checked(SearchRequest, { query, purpose: 'find', mode: requestedMode, rerank: requestedRerank, allow_degraded: !!v['allow-degraded'], ...(v['candidate-limit'] ? { candidate_limit: Number(v['candidate-limit']) } : {}), collections, ...(v.limit ? { limit: Number(v.limit) } : {}) }) : checked(LiteralRequest, { query, collections, ignore_case: !!v['ignore-case'], ...(v.limit ? { limit: Number(v.limit) } : {}) });
+        let filter; if (v['filter-json']) { if (Buffer.byteLength(v['filter-json']) > 16384) throw new DsearchError('INPUT_TOO_LARGE');filter = checked(MetadataFilter, JSON.parse(v['filter-json'])); }
+        const request = command === 'search' ? checked(SearchRequest, { query, purpose: 'find', mode: requestedMode, rerank: requestedRerank, allow_degraded: requestedAllowDegraded, candidate_limit: candidateLimit, collections, ...(filter ? { filter } : {}), ...(v.limit ? { limit: Number(v.limit) } : {}) }) : checked(LiteralRequest, { query, collections, ignore_case: !!v['ignore-case'], ...(v.limit ? { limit: Number(v.limit) } : {}) });
         packet = await call('POST', command === 'search' ? '/v1/searches' : '/v1/literal-searches', request);
         if (!v['no-wait'])
             packet = await wait(packet.data.status_url);

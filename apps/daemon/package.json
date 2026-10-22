@@ -13,10 +13,11 @@
     }
   },
   "dependencies": {
-    "@dsearch/contracts": "workspace:*",
     "@dsearch/catalog": "workspace:*",
+    "@dsearch/contracts": "workspace:*",
+    "@dsearch/engine-qmd": "workspace:*",
     "@dsearch/generations": "workspace:*",
-    "@dsearch/search": "workspace:*",
-    "@dsearch/runtime": "workspace:*"
+    "@dsearch/runtime": "workspace:*",
+    "@dsearch/search": "workspace:*"
   }
 }
