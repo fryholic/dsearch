@@ -2,6 +2,8 @@ import { terminalText } from './terminal.js';
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+import { Preferences, CollectionPatch } from '@dsearch/contracts/control';
 import { DsearchError, ErrorCode, ErrorReason, CollectionRequest, SearchRequest, LiteralRequest, ReadRequest, RelatedRequest, CompareRequest } from '@dsearch/contracts';
 import { SearchStatus } from '@dsearch/contracts/search';
 import { connect, startDaemon, waitForStopped, openUI, defaultRoot, type Packet } from './connection.js';
@@ -19,6 +21,13 @@ Usage: pnpm dsearch <command> [options]
   related <doc-id> --revision <id> --lines 1:20 [--mode hybrid]
   compare <left-id> <right-id> --left-revision <id> --right-revision <id> --query <text>
   status
+  jobs list|get|cancel [id]
+  collection update <id> [--name <name>] [--include <glob>] [--exclude <glob>]
+  collection coverage <id>
+  settings get|set [--theme system|light|dark] [--mode lexical|hybrid] [--rerank|--no-rerank]
+  doctor [--output <file>]
+  export <search-id> --output <file> [--include-query]
+  open <doc-id> --revision <revision-id>
   mcp                                Read-only MCP stdio bridge
 Options: --data-root <folder>, --json, --no-start, --no-wait, --stdin
 Repeat --collection for several collections; omission searches all enabled collections.
@@ -70,14 +79,14 @@ function print(packet: Packet) {
         process.stderr.write('Partial literal results: ' + d.stop_reason + '\n');
 }
 try {
-    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, stdin: { type: 'boolean' } } });
+    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, stdin: { type: 'boolean' } } });
     jsonOutput = !!v.json;
     if (v.help || !p.length) {
         process.stdout.write(help);
         process.exit(0);
     }
     const root = resolve(v['data-root'] ?? defaultRoot()), command = p[0];
-    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp'].includes(command!))
+    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp', 'jobs', 'settings', 'doctor', 'export', 'open'].includes(command!))
         throw new DsearchError('INVALID_REQUEST');
     if (command === 'mcp') {
         if (p.length !== 1 || v.json || v.stdin) throw new DsearchError('INVALID_REQUEST');
@@ -113,6 +122,10 @@ try {
             process.removeListener('SIGINT', interrupt);
         }
     };
+    if (v.rerank && v['no-rerank']) throw new DsearchError('INVALID_REQUEST');
+    const preferences = ['search', 'related', 'compare', 'settings'].includes(command!) ? Preferences.parse((await call('GET', '/v1/settings')).data) : undefined;
+    const requestedMode = v.mode ?? preferences?.search.mode ?? 'hybrid';
+    const requestedRerank = requestedMode !== 'lexical' && (v.rerank ? true : v['no-rerank'] ? false : preferences?.search.rerank ?? false);
     let packet: Packet;
     if (['serve', 'daemon'].includes(command!)) {
         if (p[1] === 'stop') {
@@ -136,11 +149,34 @@ try {
             throw new DsearchError('INVALID_REQUEST');
         packet = await call('GET', '/v1/status');
     }
+    else if (command === 'settings') {
+        if (p.length !== 2 || !['get', 'set'].includes(p[1]!)) throw new DsearchError('INVALID_REQUEST');
+        packet = p[1] === 'get' ? await call('GET', '/v1/settings') : await call('PUT', '/v1/settings', Preferences.parse({ ...preferences, ...(v.theme ? { theme: v.theme } : {}), search: { ...preferences!.search, mode: requestedMode, rerank: requestedRerank } }));
+    }
+    else if (command === 'doctor') {
+        if (p.length !== 1) throw new DsearchError('INVALID_REQUEST');packet = await call('POST', '/v1/diagnostics', {});
+        if (v.output) { await writeFile(resolve(v.output), JSON.stringify(packet.data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });packet = { ...packet, data: { saved: true, output: resolve(v.output) } }; }
+    }
+    else if (command === 'export') {
+        if (p.length !== 2 || !v.output || !/^[A-Za-z0-9_-]{1,128}$/.test(p[1]!)) throw new DsearchError('INVALID_REQUEST');
+        packet = await call('POST', '/v1/searches/' + p[1] + '/export', { include_query: !!v['include-query'] });
+        await writeFile(resolve(v.output), JSON.stringify(packet.data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });packet = { ...packet, data: { saved: true, output: resolve(v.output), includes_query: !!v['include-query'] } };
+    }
+    else if (command === 'open') {
+        if (p.length !== 2 || !v.revision) throw new DsearchError('INVALID_REQUEST');packet = await call('POST', '/v1/documents/open', { doc_id: p[1], revision_id: v.revision });
+    }
+    else if (command === 'jobs') {
+        if (p[1] === 'list' && p.length === 2) { const current = await call('GET', '/v1/status');packet = { ...current, data: current.data.jobs }; }
+        else if (['get', 'cancel'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call(p[1] === 'cancel' ? 'DELETE' : 'GET', '/v1/jobs/' + p[2]);
+        else throw new DsearchError('INVALID_REQUEST');
+    }
     else if (command === 'collection') {
         if (p[1] === 'list' && p.length === 2)
             packet = await call('GET', '/v1/collections');
         else if (p[1] === 'add' && p.length === 3)
             packet = await call('POST', '/v1/collections', checked(CollectionRequest, { name: v.name, root: resolve(p[2]!), preset: v.preset ?? 'general' }));
+        else if (p[1] === 'update' && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call('PATCH', '/v1/collections/' + p[2], checked(CollectionPatch, { ...(v.name ? { name: v.name } : {}), ...(v.preset ? { preset: v.preset } : {}), ...(v.include ? { include: v.include } : {}), ...(v.exclude ? { exclude: v.exclude } : {}) }));
+        else if (p[1] === 'coverage' && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call('POST', '/v1/collections/' + p[2] + '/coverage', {});
         else if (['enable', 'disable'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!))
             packet = await call('PATCH', '/v1/collections/' + p[2], { enabled: p[1] === 'enable' });
         else
@@ -154,7 +190,7 @@ try {
             packet = await wait('/v1/jobs/' + packet.data.job_id, true);
     }
     else if (command === 'related' || command === 'compare') {
-        const mode = v.mode ?? 'hybrid', common = { mode, rerank: mode !== 'lexical' && !v['no-rerank'], allow_degraded: !!v['allow-degraded'], ...(v['candidate-limit'] ? { candidate_limit: Number(v['candidate-limit']) } : {}) };
+        const mode = requestedMode, common = { mode, rerank: requestedRerank, allow_degraded: !!v['allow-degraded'], ...(v['candidate-limit'] ? { candidate_limit: Number(v['candidate-limit']) } : {}) };
         if (command === 'related') {
             if (p.length !== 2 || !v.lines || !/^\d+:\d+$/.test(v.lines)) throw new DsearchError('INVALID_REQUEST');
             const [start, end] = v.lines.split(':').map(Number);if (!start || !end || end < start) throw new DsearchError('INVALID_REQUEST');
@@ -162,7 +198,7 @@ try {
             packet = await call('POST', '/v1/related-searches', checked(RelatedRequest, { ...common, source: { doc_id: p[1], revision_id: v.revision, locator: { kind: 'markdown', start: { line: start, column_utf16: 0 }, end: { line: end + 1, column_utf16: 0 } } }, collections, ...(v.limit ? { limit: Number(v.limit) } : {}) }));
         } else {
             if (p.length !== 3) throw new DsearchError('INVALID_REQUEST');
-            packet = await call('POST', '/v1/comparisons', checked(CompareRequest, { ...common, query: v.query, left: { doc_id: p[1], revision_id: v['left-revision'] }, right: { doc_id: p[2], revision_id: v['right-revision'] } }));
+            packet = await call('POST', '/v1/comparisons', checked(CompareRequest, { ...common, query: v.query, left: { doc_id: p[1], revision_id: v['left-revision'] ?? (await call('POST', '/v1/documents/info', { doc_id: p[1] })).data.revision_id }, right: { doc_id: p[2], revision_id: v['right-revision'] ?? (await call('POST', '/v1/documents/info', { doc_id: p[2] })).data.revision_id } }));
         }
         if (!v['no-wait']) packet = await wait(packet.data.status_url);
     }
@@ -183,7 +219,7 @@ try {
             query = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)).replace(/\r?\n$/, '');
         }
         const collections = v.collection ?? (await call('GET', '/v1/collections')).data.filter((c: any) => c.enabled).map((c: any) => c.collection_id);
-        const request = command === 'search' ? checked(SearchRequest, { query, purpose: 'find', mode: v.mode ?? 'lexical', rerank: (v.mode ?? 'lexical') !== 'lexical' && !v['no-rerank'], allow_degraded: !!v['allow-degraded'], ...(v['candidate-limit'] ? { candidate_limit: Number(v['candidate-limit']) } : {}), collections, ...(v.limit ? { limit: Number(v.limit) } : {}) }) : checked(LiteralRequest, { query, collections, ignore_case: !!v['ignore-case'], ...(v.limit ? { limit: Number(v.limit) } : {}) });
+        const request = command === 'search' ? checked(SearchRequest, { query, purpose: 'find', mode: requestedMode, rerank: requestedRerank, allow_degraded: !!v['allow-degraded'], ...(v['candidate-limit'] ? { candidate_limit: Number(v['candidate-limit']) } : {}), collections, ...(v.limit ? { limit: Number(v.limit) } : {}) }) : checked(LiteralRequest, { query, collections, ignore_case: !!v['ignore-case'], ...(v.limit ? { limit: Number(v.limit) } : {}) });
         packet = await call('POST', command === 'search' ? '/v1/searches' : '/v1/literal-searches', request);
         if (!v['no-wait'])
             packet = await wait(packet.data.status_url);
@@ -196,6 +232,7 @@ try {
             throw new DsearchError('INVALID_REQUEST');
         packet = await call('POST', '/v1/documents/read', checked(ReadRequest, { doc_id: p[1], revision_id: v.revision, locator: { kind: 'markdown', start: { line: start, column_utf16: 0 }, end: { line: end + 1, column_utf16: 0 } } }));
     }
+    if (v['require-full'] && (packet!.data.degraded || (packet!.data.purpose === 'compare' && (packet!.data.left.result.degraded || packet!.data.right.result.degraded)))) throw new DsearchError('MODEL_UNAVAILABLE');
     print(packet!);
 }
 catch (error) {

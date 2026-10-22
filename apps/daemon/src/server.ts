@@ -9,8 +9,9 @@ import { homedir } from 'node:os';
 import { StateStore, Catalog, canonicalJSON, digest } from '@dsearch/catalog';
 import { GenerationBuilder, createAlphaProfile, atomicFile } from '@dsearch/generations';
 import { ReaderPool, SourceSearch, SearchSessions } from '@dsearch/search';
-import { API_VERSION, DsearchError, ErrorCode, CollectionRequest, ReadRequest, ProfileManifest } from '@dsearch/contracts';
-import { CollectionInfo, CollectionPatch, JobInfo, AppStatus, ReadResponse } from '@dsearch/contracts/control';
+import { API_VERSION, DsearchError, ErrorCode, CollectionRequest, ReadRequest, ProfileManifest, DocumentRef } from '@dsearch/contracts';
+import { CollectionInfo, CollectionPatch, JobInfo, AppStatus, ReadResponse, ExportRequest, CoverageRequest } from '@dsearch/contracts/control';
+import { PreferenceStore, exportSearch, openRegisteredDocument } from './management.js';
 import { LocalAuth } from './auth.js';
 import { privateRoot, takeOwnership } from './owner.js';
 const workspace = fileURLToPath(new URL('../../../', import.meta.url));
@@ -87,6 +88,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
         const builder = new GenerationBuilder(catalog, { engineRoot, modelRoot, profile, embedRole: profile.models.embed.dimension === 1024 ? 'embed' : 'reference', lane, beforeWork: () => readers.unloadExcept() });
         readers = new ReaderPool(catalog, { engineRoot, modelRoot, profile_fp: profileFp });
         const sessions = new SearchSessions(new SourceSearch(catalog), readers, { lane });
+        const preferences = new PreferenceStore(root);await preferences.load();
         stopWorkers = async () => { await Promise.allSettled([builder.close(), sessions.close()]); };
         auth = await LocalAuth.open(root, instance, options.now);
         const authentication = auth, store = state, staticFiles = await assets(options.webRoot ?? join(workspace, 'apps/web/dist-web'));
@@ -125,7 +127,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 json(res, 200, { ok: true, version: '0.1.0-alpha' });
                 return;
             }
-            const asset = staticFiles.get(path === '/' ? 'index.html' : path.slice(1));
+            const asset = staticFiles.get(['/', '/search', '/collections', '/jobs', '/settings', '/diagnostics'].includes(path) ? 'index.html' : path.slice(1));
             if (asset && ['GET', 'HEAD'].includes(req.method ?? '')) {
                 res.writeHead(200, { 'Content-Type': asset.type, 'Content-Length': asset.bytes.length });
                 res.end(req.method === 'HEAD' ? undefined : asset.bytes);
@@ -157,6 +159,20 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 json(res, 200, envelope(status(), requestId));
                 return;
             }
+            if (path === '/v1/settings' && req.method === 'GET') { json(res, 200, envelope(preferences.get(), requestId));return; }
+            if (path === '/v1/settings' && req.method === 'PUT') { json(res, 200, envelope(await preferences.set(await body(req)), requestId));return; }
+            if (path === '/v1/diagnostics' && req.method === 'POST') {
+                const input = await body(req);if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) throw new DsearchError('INVALID_REQUEST');
+                const current = status();json(res, 200, envelope({ diagnostic_version: 1, created_at: new Date().toISOString(), runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, version: current.version, generation: current.generation, profile: current.profile, execution: current.execution, needs_rebuild: current.needs_rebuild, scope_incomplete: current.scope_incomplete, coverage: current.coverage, jobs: current.jobs.map(job => ({ state: job.state, phase: job.phase, error_code: job.error_code })), storage_policy: { queries: 'memory-only', results: 'memory-only', source_writes: false }, capabilities: { mcp: true, incremental_sync: false, backup_restore: false, deep: false } }, requestId));return;
+            }
+            if (path === '/v1/documents/open' && req.method === 'POST') {
+                const parsed = DocumentRef.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
+                json(res, 200, envelope(await openRegisteredDocument(catalog, parsed.data.doc_id, parsed.data.revision_id), requestId));return;
+            }
+            const exported = /^\/v1\/searches\/([A-Za-z0-9_-]{1,128})\/export$/.exec(path);
+            if (exported && req.method === 'POST') { const parsed = ExportRequest.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');json(res, 200, envelope(exportSearch(sessions.get(exported[1]!), parsed.data.include_query), requestId));return; }
+            const coveragePath = /^\/v1\/collections\/([A-Za-z0-9_-]{1,128})\/coverage$/.exec(path);
+            if (coveragePath && req.method === 'POST') { const parsed = CoverageRequest.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');const c = catalog.collection(coveragePath[1]!), docs = catalog.documents(c.collection_id).filter(d => d.present), { offset, limit } = parsed.data;json(res, 200, envelope({ collection_id: c.collection_id, total: docs.length, offset, has_more: offset + limit < docs.length, documents: docs.slice(offset, offset + limit).map(d => ({ doc_id: d.doc_id, relative_path: d.relative_path, eligibility: d.eligibility, reason: d.eligibility_reason, revision_id: d.latest_revision_id })), scope: catalog.scanStatus(c.collection_id) }, requestId));return; }
             if (path === '/v1/collections' && req.method === 'GET') {
                 json(res, 200, envelope(catalog.listCollections().map(c => collectionInfo(c.collection_id)), requestId));
                 return;
@@ -174,7 +190,8 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 const parsed = CollectionPatch.safeParse(await body(req));
                 if (!parsed.success)
                     throw new DsearchError('INVALID_REQUEST');
-                const { enabled, ...scope } = parsed.data;
+                const { enabled, name, ...scope } = parsed.data;
+                if (name !== undefined) catalog.rename(collection[1]!, name);
                 if (Object.keys(scope).length)
                     catalog.setScope(collection[1]!, scope);
                 if (enabled !== undefined)
@@ -211,6 +228,11 @@ export async function createApplication(options: ApplicationOptions = {}) {
                     throw new DsearchError('INVALID_REQUEST');
                 json(res, 200, envelope(ReadResponse.parse(await catalog.read(parsed.data)), requestId));
                 return;
+            }
+            if (path === '/v1/documents/info' && req.method === 'POST') {
+                const value = await body(req);if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || !('doc_id' in value) || typeof value.doc_id !== 'string') throw new DsearchError('INVALID_REQUEST');
+                const doc = catalog.document(value.doc_id);if (!doc.latest_revision_id) throw new DsearchError('SOURCE_PENDING');
+                const current = await catalog.readDocument(doc.doc_id, doc.latest_revision_id);json(res, 200, envelope({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, collection_id: doc.collection_id, relative_path: doc.relative_path, title: current.metadata.title ?? doc.relative_path }, requestId));return;
             }
             const search = /^\/v1\/searches\/([A-Za-z0-9_-]{1,128})(\/events)?$/.exec(path);
             if (search) {

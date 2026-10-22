@@ -49,6 +49,11 @@ export class Catalog {
   setEnabled(id: string, enabled: boolean): void {
     this.collection(id);this.state.transaction(() => { this.state.db.prepare("UPDATE collections SET enabled=? WHERE collection_id=?").run(Number(enabled), id);this.state.advance(); });
   }
+  rename(id: string, name: string): void {
+    this.collection(id);const parsed = CollectionRequest.shape.name.safeParse(name);
+    if (!parsed.success || this.listCollections().some(c => c.collection_id !== id && c.name === parsed.data)) throw new DsearchError('INVALID_REQUEST');
+    this.state.db.prepare('UPDATE collections SET name=? WHERE collection_id=?').run(parsed.data, id);
+  }
   setScope(id: string, input: unknown): void {
     const row = this.collection(id), previous = JSON.parse(row.scope_json) as ScopePolicy;
     const parsed = CollectionRequest.safeParse({ name: row.name, root: row.root_path, preset: previous.preset, include: previous.include, exclude: previous.exclude, ...(input as object) });

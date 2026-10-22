@@ -34,7 +34,7 @@ dsearch는 [QMD](https://github.com/tobi/qmd)를 검색 엔진으로 사용하�
 - **컬렉션 관리** — 폴더 등록, 검색 범위 선택, 사용 중지와 수동 색인을 지원합니다.
 - **로컬 처리** — 검색어와 검색 결과는 메모리 세션으로 관리합니다.
 
-MCP·전체 운영 GUI·자동 동기화·Obsidian 연동은 [로드맵](#roadmap)에 포함되어 있습니다.
+전체 운영 GUI·자동 동기화·Obsidian 연동은 [로드맵](#roadmap)에 포함되어 있습니다.
 
 ## Requirements
 
@@ -105,7 +105,7 @@ pnpm dsearch search "인증서" --collection COLLECTION_ID --json
 ### 의미 검색과 리랭킹
 
 ```sh
-# 의미 검색 + 리랭킹
+# 의미 검색 + 리랭킹 (명시적으로 활성화)
 pnpm dsearch search "두 장치가 비밀을 보내지 않고 같은 키 자료를 얻는 방법" --mode hybrid --json
 
 # 리랭킹 없이 키워드·벡터 후보를 결합
@@ -115,7 +115,7 @@ pnpm dsearch search "공개키의 신뢰 조건" --mode hybrid --no-rerank --jso
 pnpm dsearch search "서명할 바이트열" --mode hybrid --allow-degraded --candidate-limit 40 --json
 ```
 
-기본 방식은 `lexical`입니다. `hybrid`는 자연어 질의에 사용합니다. 응답에는 요청·실제 방식, `rank_stage`, `degraded`, 후보 수와 최대 두 원문 근거를 포함합니다. 리랭킹을 할 수 없으면 허용한 경우 실제 RRF 검색을 다시 수행하고, 임베딩 모델을 사용할 수 없으면 키워드 검색으로 전환합니다. 입력 길이 초과나 취소를 대체 성공으로 처리하지 않습니다.
+초기 기본 방식은 `hybrid`이고 리랭킹은 꺼져 있습니다. GUI와 `settings set`에서 기본값을 변경할 수 있습니다. `hybrid`는 자연어 질의에 사용합니다. 응답에는 요청·실제 방식, `rank_stage`, `degraded`, 후보 수와 최대 두 원문 근거를 포함합니다. 리랭킹을 할 수 없으면 허용한 경우 실제 RRF 검색을 다시 수행하고, 임베딩 모델을 사용할 수 없으면 키워드 검색으로 전환합니다. 입력 길이 초과나 취소를 대체 성공으로 처리하지 않습니다.
 
 벡터를 만들지 못한 큰 코드·표 등은 `supplemental_results`에 별도로 반환합니다. 의미 검색의 점수와 합산하지 않습니다. `deep`은 선택적 확장 모델이 없어 기본적으로 `MODEL_NOT_INSTALLED`를 반환합니다. `--allow-degraded`를 지정한 경우 실제 hybrid 경로로 전환하며 이유를 표시합니다.
 
@@ -291,7 +291,7 @@ apps/
 ├── daemon/       로컬 HTTP API, 인증, 작업 조정
 ├── cli/          명령줄 클라이언트
 ├── web/          React 웹 GUI
-├── mcp/          MCP 브리지 기반 구조 — 구현 예정
+├── mcp/          읽기 전용 MCP stdio 브리지
 └── obsidian/     Obsidian 플러그인 기반 구조 — 구현 예정
 packages/
 ├── contracts/    요청·응답 스키마와 공통 DTO
@@ -322,7 +322,8 @@ vendor/           upstream manifest, 패치, 모델 registry, 라이선스
 - [x] 원문 기반 관련 검색과 독립 revision 비교
 - [x] 두 임베딩·세 검색 구성의 합성 조정 평가
 - [ ] 대표 자료의 검색 품질·지연·메모리 비교
-- [ ] MCP 읽기 도구와 전체 GUI·CLI 확장
+- [x] MCP 검색·읽기·관련·비교·상태·취소 도구
+- [ ] 전체 GUI·CLI 확장과 모델 준비 흐름
 - [ ] 자동 동기화, 증분 갱신, 복구·백업·세대 정리
 - [ ] 설치 패키지와 운영 검증
 - [ ] Obsidian 연결 검토·확정 링크 연동
@@ -350,3 +351,18 @@ QMD의 MIT 라이선스 고지는 [vendor/licenses/QMD-LICENSE](vendor/licenses/
 
 - [QMD](https://github.com/tobi/qmd) — 검색 엔진 기반
 - Qwen3-Embedding·Qwen3-Reranker·EmbeddingGemma — 로컬 모델과 엔진 비교 시험
+
+### MCP와 운영 인터페이스
+
+`pnpm dsearch mcp`는 같은 로컬 daemon에 연결하는 stdio 서버입니다. 검색·읽기·관련 자료·비교·상태·컬렉션 ID 조회·검색 취소를 제공하며 관리 명령과 원문 쓰기는 제공하지 않습니다. MCP stdout에는 프로토콜 메시지만 출력하고, 문서 본문은 신뢰할 수 없는 자료로 표시합니다. 결과는 64KiB 안에서 반환하며 생략이 있으면 후속 읽기 안내를 제공합니다.
+
+```sh
+pnpm dsearch settings get --json
+pnpm dsearch settings set --theme light --mode hybrid --no-rerank
+pnpm dsearch doctor --json
+pnpm dsearch collection coverage COLLECTION_ID --json
+pnpm dsearch jobs list --json
+pnpm dsearch export SEARCH_ID --output results.json
+```
+
+결과 내보내기는 기본적으로 질의를 제외합니다. `--include-query`를 명시하면 질의 계획도 포함합니다. 기존 파일은 덮어쓰지 않습니다. 설정·진단과 컬렉션 범위 편집은 GUI에서도 사용할 수 있습니다. 초기 등록·모델 준비, 관련 자료·비교 전용 화면과 전체 반응형 검증은 P5의 남은 작업입니다.

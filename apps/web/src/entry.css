@@ -66,7 +66,7 @@ input,
 select {
   border: 1px solid var(--stroke-control);
   border-radius: 12px;
-  background: white;
+  background: var(--bg-surface);
   padding: 10px 12px;
   min-width: 0;
 }
@@ -91,7 +91,7 @@ details[open] > summary {
   border: 1px solid var(--stroke-control);
   border-radius: 12px;
   padding: 10px 16px;
-  background: white;
+  background: var(--bg-surface);
   white-space: normal;
   font-weight: 600;
   line-height: 22px;
@@ -110,7 +110,7 @@ details[open] > summary {
   top: -100px;
   left: 16px;
   z-index: 20;
-  background: white;
+  background: var(--bg-surface);
   padding: 12px;
 }
 .skip-link:focus {
@@ -160,7 +160,7 @@ nav {
 .nav-item {
   border: 1px solid transparent;
   border-radius: 12px;
-  background: white;
+  background: var(--bg-surface);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -307,7 +307,7 @@ nav {
   padding: 3px;
 }
 .segmented button {
-  background: white;
+  background: var(--bg-surface);
   border: 1px solid transparent;
   padding: 6px 12px;
   border-radius: 8px;
@@ -396,7 +396,7 @@ nav {
 .result-main {
   display: block;
   width: 100%;
-  background: white;
+  background: var(--bg-surface);
   border: 0;
   text-align: left;
   padding: 20px;
@@ -701,7 +701,7 @@ td {
   z-index: 10;
 }
 .dialog {
-  background: white;
+  background: var(--bg-surface);
   border-radius: 20px;
   border: 1px solid var(--stroke-default);
   padding: 32px;
@@ -977,3 +977,22 @@ td {
 .comparison-pins h2, .supplemental h3 { font-size: 16px; line-height: 24px; margin: 0 0 12px; }
 .comparison-pins > .button { margin: 8px 8px 0 0; }
 .supplemental { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--stroke-default); }
+
+.management-form { display: grid; gap: 20px; max-width: 900px; }
+.management-card { padding: 24px; border: 1px solid var(--stroke-default); border-radius: 16px; background: var(--bg-surface); display: grid; gap: 16px; min-width: 0; }
+.management-card dl { display: grid; grid-template-columns: minmax(100px, .4fr) minmax(0, 1fr); gap: 12px 20px; }
+.management-card dd { margin: 0; overflow-wrap: anywhere; }
+.management-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.management-form fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.management-form legend { font-weight: 600; margin-bottom: 12px; }
+.theme-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.theme-choices label { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.collection-editor { margin-top: 16px; }
+.collection-editor .management-form { margin-bottom: 16px; }
+.collection-editor label { display: grid; gap: 8px; }
+textarea { font: inherit; color: inherit; background: var(--bg-surface); border: 1px solid var(--stroke-control); border-radius: 12px; padding: 10px 12px; width: 100%; resize: vertical; }
+textarea:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }
+.coverage-list { list-style: none; padding: 0; }
+.coverage-list li { display: grid; gap: 4px; padding: 12px 0; border-bottom: 1px solid var(--stroke-default); }
+.export-actions { margin-bottom: 20px; }
+@media(max-width:767px) { .management-card { padding: 16px; }.management-card dl { grid-template-columns: 1fr; gap: 4px; }.management-card dd { margin-bottom: 12px; } }
