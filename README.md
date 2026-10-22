@@ -206,13 +206,13 @@ pnpm dsearch export SEARCH_ID --output results.json
 
 ### 데이터 디렉터리
 
-기본 위치는 다음과 같습니다.
+macOS의 기본 데이터 디렉터리는 다음과 같습니다.
 
 ```text
 ~/Library/Application Support/dsearch
 ```
 
-별도 실험 환경은 `--data-root`로 분리할 수 있습니다. 같은 환경을 사용하는 명령에는 동일한 경로를 지정하세요.
+개발·테스트 등 별도 환경은 `--data-root`로 분리할 수 있습니다. 같은 환경에 연결하는 CLI·GUI·MCP 명령에는 동일한 경로를 지정하세요.
 
 `--data-root`는 카탈로그·색인·설정을 분리합니다. 기본 설치 모델은 프로젝트의 `.local/models/`에서 공유합니다.
 
@@ -222,20 +222,30 @@ pnpm dsearch status --data-root .local/dev-data --json
 pnpm dsearch serve stop --data-root .local/dev-data
 ```
 
-### 컬렉션 프리셋
+### 컬렉션과 검색 범위
 
-기본 `general` 프리셋은 일반 Markdown 폴더에 사용합니다.
+컬렉션은 검색할 문서 폴더와 포함·제외 규칙을 묶은 단위입니다. 프로젝트 문서, 연구 노트, 개인 지식 자료 등 기존 Markdown 폴더를 등록할 수 있습니다.
 
-`learning`은 다음 보관소 구조를 위한 선택적 프리셋입니다. 등록할 경로는 보관소 루트입니다.
+기본 `general` 프리셋은 `.md`와 `.markdown` 파일을 대상으로 하며, 정해진 폴더 구조나 학습용 메타데이터를 요구하지 않습니다.
 
-```text
-30_Resources/
-├── ASN.1/
-├── Crypto/
-└── V2X-Crypto/
+```sh
+pnpm dsearch collection add /absolute/path/to/documents --name "My documents"
 ```
 
-이 프리셋은 `role` 또는 `type`이 `lesson`, `concept`, `example`인 문서를 포함하고, `Sources` 디렉터리·source 역할·`superseded` 상태를 제외합니다.
+검색 범위는 `--include`와 `--exclude`의 glob 패턴으로 조정합니다. 패턴은 등록할 폴더를 기준으로 해석하며, 셸에서 미리 확장되지 않도록 따옴표로 감쌉니다.
+
+```sh
+# 등록 전 포함·제외 범위 확인
+pnpm dsearch collection preview /absolute/path/to/documents \
+  --name "My documents" \
+  --include '**/*.md' --include '**/*.markdown' \
+  --exclude 'archive/**' --exclude 'drafts/**' \
+  --json
+```
+
+미리보기는 컬렉션을 등록하지 않습니다. 확인한 범위를 등록하려면 같은 경로와 옵션으로 `collection add`를 실행하세요. 기존 컬렉션의 규칙은 `collection update COLLECTION_ID`로 변경할 수 있습니다.
+
+`--include`를 지정하면 기본 포함 패턴을 대체합니다. 여러 포함 패턴 중 하나에 일치하면 포함 후보가 되고, 제외 패턴에 일치하면 제외합니다. 숨김 폴더·`node_modules`·symlink·제품 데이터 폴더는 기본적으로 제외합니다. 추가 프리셋의 세부 규칙은 [컬렉션 범위 정책](packages/catalog/src/policy.ts)에서 확인할 수 있습니다.
 
 ### 엔진과 모델
 
