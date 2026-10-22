@@ -112,3 +112,5 @@ export class EngineProcess {
 }
 
 export { HeavyLane } from './heavy-lane.js';
+
+export { connect, startDaemon, waitForStopped, openUI, defaultRoot, type Packet } from './client.js';

@@ -11,5 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@dsearch/contracts": "workspace:*",
+    "@dsearch/runtime": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.2.1"
   }
 }

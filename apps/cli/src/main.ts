@@ -19,6 +19,7 @@ Usage: pnpm dsearch <command> [options]
   related <doc-id> --revision <id> --lines 1:20 [--mode hybrid]
   compare <left-id> <right-id> --left-revision <id> --right-revision <id> --query <text>
   status
+  mcp                                Read-only MCP stdio bridge
 Options: --data-root <folder>, --json, --no-start, --no-wait, --stdin
 Repeat --collection for several collections; omission searches all enabled collections.
 --lines includes both end lines; JSON locators use an exclusive end.
@@ -76,8 +77,13 @@ try {
         process.exit(0);
     }
     const root = resolve(v['data-root'] ?? defaultRoot()), command = p[0];
-    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare'].includes(command!))
+    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp'].includes(command!))
         throw new DsearchError('INVALID_REQUEST');
+    if (command === 'mcp') {
+        if (p.length !== 1 || v.json || v.stdin) throw new DsearchError('INVALID_REQUEST');
+        const { startMcp } = await import('@dsearch/app-mcp');await startMcp(root, !!v['no-start']);
+        process.exit(0);
+    }
     if (['serve', 'daemon'].includes(command!) && (!['start', 'status', 'stop'].includes(p[1] ?? '') || p.length !== 2))
         throw new DsearchError('INVALID_REQUEST');
     const client = ['serve', 'daemon'].includes(command!) && p[1] === 'start' ? await startDaemon(root) : v['no-start'] || (['serve', 'daemon'].includes(command!) && p[1] !== 'start') ? await connect(root) : await startDaemon(root), call = client.call;

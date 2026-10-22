@@ -14,3 +14,15 @@ test('related query fits real-tokenizer callback and reports exact used/omitted 
  for(const locator of [...plan.used_spans,...plan.omitted_spans]){const span=selectionRange(text,locator);assert.ok(span.start>=0&&span.end<=text.length);}
  assert.throws(()=>selectionRange(text,{start:{line:9999,column_utf16:0},end:{line:9999,column_utf16:0}}),{code:'INVALID_LOCATOR'});
 });
+test('related query heading ancestry respects code, YAML, Setext and ATX syntax',async()=>{
+ const text='---\nexample: |\n  # YAML comment\n---\n\nActual topic\n============\n\n```sh\n# Install Python dependencies\n```\n\n#not-a-heading\n\n## Real section\n\nSelected ECDH definition.';
+ const plan=await relatedQuery(text,{start:text.indexOf('Selected'),end:text.length});
+ assert.ok(plan.query.includes('Actual topic'));assert.ok(plan.query.includes('Real section'));assert.ok(plan.query.includes('Selected ECDH'));
+ assert.ok(!plan.query.includes('Python'));assert.ok(!plan.query.includes('YAML'));assert.ok(!plan.query.includes('not-a-heading'));
+});
+test('related query never spends its entire budget on heading context',async()=>{
+ const text=Array.from({length:6},(_,i)=>'#'.repeat(i+1)+' '+String.fromCharCode(65+i).repeat(200)).join('\n\n')+'\n\nSelected ECDH definition.';
+ const selected={start:text.indexOf('Selected'),end:text.length};
+ for(const counter of [undefined,async q=>[...q].length]){const plan=await relatedQuery(text,selected,counter);assert.ok(plan.query.includes('Selected ECDH definition.'));assert.ok(plan.used_spans.some(l=>selectionRange(text,l).start===selected.start));}
+ await assert.rejects(relatedQuery('# Heading\n\n   ',{start:11,end:14}),{code:'INVALID_QUERY'});
+});
