@@ -1,6 +1,6 @@
 import { HeavyLane } from "@dsearch/runtime";
 import { randomUUID } from "node:crypto";
-import { mkdir, chmod } from "node:fs/promises";
+import { mkdir, chmod, readFile } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
 import { Catalog, canonicalJSON, digest, legacyNavigationHeadings } from "@dsearch/catalog";
 import { compileDocument, type Passage, type CoverageBlock, type CompiledDocument } from "@dsearch/compiler";
@@ -8,6 +8,7 @@ import { DsearchError, type ProfileManifest } from "@dsearch/contracts";
 import { JobInfo } from "@dsearch/contracts/control";
 import { QmdWorker, type EngineResponse, type OpenEngine } from "@dsearch/engine-qmd";
 import { atomicFile, sealFiles, verifySeal } from "./seal.js";
+import { snapshotForReuse, type SourceInput } from './reuse.js';
 export type GenerationDocument = { doc_id: string; revision_id: string | null; collection_id: string; state: "included" | "partial" | "lexical_only" | "excluded" | "pending" | "failed"; reason: string | null; coverage: CoverageBlock[] };
 export type IndexedPassage = Omit<Passage, "text"> & { engine_collection: string; engine_relative_path: string };
 export type BuildResult = { generation_id: string; epoch: number; manifest_sha256: string; coverage: GenerationDocument[]; published: boolean };
@@ -15,7 +16,7 @@ export type BuildHandle = { job_id: string; generation_id: string; completion: P
 type ActiveBuild = { controller: AbortController; handle: BuildHandle };
 const timestamp = () => new Date().toISOString();
 
-/** Manual full-generation builder with validation before publication. */
+/** Manual generation builder; reuse is confined to verified, compatible snapshots. */
 export class GenerationBuilder {
   private active: ActiveBuild | undefined;
   private closing = false;
@@ -31,7 +32,7 @@ export class GenerationBuilder {
     if (this.active?.handle.job_id !== id) return;
     this.catalog.state.db.prepare("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE job_id=?").run(timestamp(), id);this.active.controller.abort();
   }
-  start(options: { publish?: boolean } = {}): BuildHandle {
+  start(options: { publish?: boolean; full?: boolean } = {}): BuildHandle {
     if (this.closing) throw new DsearchError("SERVICE_UNAVAILABLE");
     if (this.active) throw new DsearchError("BUSY");
     const state = this.catalog.state, profile = this.options.profile, fp = digest(canonicalJSON(profile)), jobId = randomUUID(), genId = randomUUID();
@@ -45,14 +46,14 @@ export class GenerationBuilder {
     });
     const controller = new AbortController();
     // Defer execution until the caller has received the persisted queued job ID.
-    const completion = Promise.resolve().then(() => this.perform(jobId, genId, directory, fp, controller.signal, options.publish !== false)).finally(() => { if (this.active?.handle.job_id === jobId) this.active = undefined; });
+    const completion = Promise.resolve().then(() => this.perform(jobId, genId, directory, fp, controller.signal, options.publish !== false, options.full === true)).finally(() => { if (this.active?.handle.job_id === jobId) this.active = undefined; });
     const handle = { job_id: jobId, generation_id: genId, completion };this.active = { controller, handle };void completion.catch(() => {});return handle;
   }
   async close(): Promise<void> { this.closing = true;const active = this.active;if (active) { active.controller.abort();await active.handle.completion.catch(() => {}); } }
   private phase(jobId: string, phase: string, progress: object = {}): void {
     this.catalog.state.db.prepare("UPDATE jobs SET state='running',phase=?,progress_json=?,updated_at=? WHERE job_id=?").run(phase, canonicalJSON(progress), timestamp(), jobId);
   }
-  private async perform(jobId: string, genId: string, directory: string, fp: string, signal: AbortSignal, publish: boolean): Promise<BuildResult> {
+  private async perform(jobId: string, genId: string, directory: string, fp: string, signal: AbortSignal, publish: boolean, full: boolean): Promise<BuildResult> {
     const state = this.catalog.state, profile = this.options.profile, builder = new QmdWorker();let reader: QmdWorker | undefined;
     const check = () => { if (signal.aborted) throw new DsearchError("CANCELLED"); };
     let releaseLane!: () => void;
@@ -82,9 +83,17 @@ export class GenerationBuilder {
         names.set(collection.collection_id, { semantic: sem, lexical: lex });semantic.push(sem);
       }
       const engine: OpenEngine = { engineRoot: this.options.engineRoot, dbPath: join(directory, "qmd.sqlite"), collectionPath: join(directory, "projection"), modelRoot: this.options.modelRoot, embedRole: this.options.embedRole, strict: true, role: "builder", generationId: genId, collections: internal, semanticCollections: semantic };
+      const reuse = full ? undefined : await snapshotForReuse(this.catalog, fp, engine, signal);
       await builder.open(engine);check();
-      const probe = await builder.invoke<EngineResponse<{ dimension: number; norm: number }>>("embedding", { text: "dsearch dimension validation probe", title: "", isQuery: true }, { signal });
-      if (probe.result.dimension !== profile.models.embed.dimension || !Number.isFinite(probe.result.norm) || probe.result.norm <= 0) throw new DsearchError("COMPATIBILITY_FAILED");
+      if (!reuse) {
+        const probe = await builder.invoke<EngineResponse<{ dimension: number; norm: number }>>("embedding", { text: "dsearch dimension validation probe", title: "", isQuery: true }, { signal });
+        if (probe.result.dimension !== profile.models.embed.dimension || !Number.isFinite(probe.result.norm) || probe.result.norm <= 0) throw new DsearchError("COMPATIBILITY_FAILED");
+      }
+      const previousInputs = new Map(reuse?.inputs.map(input=>[input.doc_id,canonicalJSON(input)]));
+      const previousCoverageById = new Map(reuse?.coverage.map(doc=>[doc.doc_id,doc]));
+      const previousPassagesById = new Map<string, IndexedPassage[]>();
+      for (const passage of reuse?.mappings ?? []) { const list = previousPassagesById.get(passage.doc_id) ?? [];list.push(passage);previousPassagesById.set(passage.doc_id,list); }
+      const inputs: SourceInput[] = [];let reusedDocuments = 0;
       const coverage: GenerationDocument[] = [], mappings: IndexedPassage[] = [], files: string[] = [];
       let completed = 0;
       for (const doc of docs) {
@@ -93,6 +102,17 @@ export class GenerationBuilder {
           coverage.push({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, collection_id: doc.collection_id, state: doc.eligibility === "pending" ? "pending" : ["unreadable", "invalid_metadata", "unsupported_encoding"].includes(doc.eligibility) ? "failed" : "excluded", reason: doc.eligibility_reason, coverage: [] });completed++;continue;
         }
         const source = await this.catalog.readDocument(doc.doc_id, doc.latest_revision_id), collection = collections.find(c => c.collection_id === doc.collection_id)!;
+        const sourceInput = { doc_id: doc.doc_id, revision_id: doc.latest_revision_id, relative_path: doc.relative_path, scope_fp: collection.scope_fp };inputs.push(sourceInput);
+        const cached = previousInputs.get(doc.doc_id) === canonicalJSON(sourceInput);
+        const previousCoverage = cached && previousCoverageById.get(doc.doc_id);
+        if (previousCoverage && ['included','partial','lexical_only','excluded'].includes(previousCoverage.state)) {
+          coverage.push(previousCoverage);
+          for (const passage of previousPassagesById.get(doc.doc_id) ?? []) {
+            const path = "projection/" + passage.engine_collection + "/" + passage.engine_relative_path;
+            await atomicFile(join(directory,path), await readFile(join(reuse!.directory,path)));files.push(path);mappings.push(passage);
+          }
+          reusedDocuments++;completed++;continue;
+        }
         let compiled: CompiledDocument;
         try {
           compiled = await compileDocument({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, text: source.text, metadata: source.metadata, fallback_title: basename(doc.relative_path, extname(doc.relative_path)), navigation_headings: (JSON.parse(collection.scope_json).navigation_headings ?? legacyNavigationHeadings(JSON.parse(collection.scope_json).preset)), signal }, async (text, title, file) => (await builder.invoke<EngineResponse<{ embeddingTokens: number; embeddingChunks: number; searchChunks: number; safe: boolean }>>("inspect", { text, title, file }, { signal })).result);
@@ -130,7 +150,7 @@ export class GenerationBuilder {
       for (const doc of coverage.filter(d => ["included", "partial", "lexical_only"].includes(d.state))) await this.catalog.readDocument(doc.doc_id, doc.revision_id!);
       if (state.sourceSeq !== sourceSeq) throw new DsearchError("STALE_EPOCH");
       this.phase(jobId, "sealing");
-      for (const [name, value] of Object.entries({ "profile.json": profile, "engine-config.json": engine, "mappings.json": mappings, "coverage.json": coverage, "catalog.json": { scopes, source_seq: sourceSeq, boundaries: reports.map(r => ({ collection_id: r.collection_id, scope_incomplete: r.scope_incomplete, boundaries: r.boundaries })) } })) { await atomicFile(join(directory, name), canonicalJSON(value) + "\n");files.push(name); }
+      for (const [name, value] of Object.entries({ "source-inputs.json": { schema_version: 1, inputs }, "profile.json": profile, "engine-config.json": engine, "mappings.json": mappings, "coverage.json": coverage, "catalog.json": { scopes, source_seq: sourceSeq, boundaries: reports.map(r => ({ collection_id: r.collection_id, scope_incomplete: r.scope_incomplete, boundaries: r.boundaries })) } })) { await atomicFile(join(directory, name), canonicalJSON(value) + "\n");files.push(name); }
       files.push("qmd.sqlite");
       const sealed = await sealFiles(directory, { schema_version: 1, generation_id: genId, profile_fp: fp, source_seq: sourceSeq, scopes, documents: docs.length, passages: mappings.length, created_at: timestamp() }, files);
       state.transaction(() => {
@@ -148,7 +168,7 @@ export class GenerationBuilder {
           if (state.sourceSeq !== sourceSeq || Number(state.db.prepare('SELECT epoch FROM active_slot WHERE slot=1').get()?.epoch ?? 0) !== expectedEpoch) throw new DsearchError('STALE_EPOCH');
           state.db.prepare("UPDATE profiles SET status='validated' WHERE profile_id=?").run(profile.profile_id);
           state.db.prepare("UPDATE generations SET state='ready' WHERE generation_id=?").run(genId);
-          state.db.prepare("UPDATE jobs SET state='succeeded',phase='ready',progress_json=?,updated_at=? WHERE job_id=?").run(canonicalJSON({ documents: docs.length, passages: mappings.length }), timestamp(), jobId);
+          state.db.prepare("UPDATE jobs SET state='succeeded',phase='ready',progress_json=?,updated_at=? WHERE job_id=?").run(canonicalJSON({ documents: docs.length, passages: mappings.length, reused_documents: reusedDocuments, embedding_calls: embedded.stats.embeddingCalls }), timestamp(), jobId);
         });
         return { generation_id: genId, epoch: 0, manifest_sha256: sealed.sha256, coverage, published: false };
       }
@@ -163,7 +183,7 @@ export class GenerationBuilder {
         state.db.prepare("INSERT INTO active_slot VALUES (1,?,?,?) ON CONFLICT(slot) DO UPDATE SET generation_id=excluded.generation_id,epoch=excluded.epoch,changed_at=excluded.changed_at").run(genId, epoch, timestamp());
         state.db.prepare("UPDATE generations SET state='active' WHERE generation_id=?").run(genId);
         this.catalog.markPoliciesIndexed(collections.map(c => c.collection_id));
-        state.db.prepare("UPDATE jobs SET state='succeeded',phase='complete',progress_json=?,updated_at=? WHERE job_id=?").run(canonicalJSON({ documents: docs.length, passages: mappings.length }), timestamp(), jobId);
+        state.db.prepare("UPDATE jobs SET state='succeeded',phase='complete',progress_json=?,updated_at=? WHERE job_id=?").run(canonicalJSON({ documents: docs.length, passages: mappings.length, reused_documents: reusedDocuments, embedding_calls: embedded.stats.embeddingCalls }), timestamp(), jobId);
       });
       return { generation_id: genId, epoch, manifest_sha256: sealed.sha256, coverage, published: true };
     } catch (e) {

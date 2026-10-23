@@ -22,6 +22,8 @@ test('initial CLI owns lifecycle and shares actual HTTP IDs, revisions, locators
   const restored=await cli(data,['settings','set','--candidate-limit','40','--no-degraded']);assert.equal(restored.code,0);assert.equal(restored.packet.data.search.allow_degraded,false);
   const diagnostic=await cli(data,['doctor']);assert.equal(diagnostic.code,0);assert.ok(!JSON.stringify(diagnostic.packet.data).includes(sources));
   const built=await cli(data,['reconcile']);assert.equal(built.code,0,built.err);assert.equal(built.packet.data.state,'succeeded');assert.ok(built.err.length);
+  const reused=await cli(data,['reconcile']);assert.equal(reused.code,0,reused.err);assert.equal(reused.packet.data.progress.embedding_calls,0);assert.ok(reused.packet.data.progress.reused_documents>0);
+  const full=await cli(data,['reconcile','--full']);assert.equal(full.code,0,full.err);assert.equal(full.packet.data.progress.reused_documents,0);assert.ok(full.packet.data.progress.embedding_calls>0);
   const generations=await cli(data,['generation','list']);assert.equal(generations.code,0);assert.equal(generations.packet.data[0].state,'active');
   const found=await cli(data,['search','서명','--collection',id,'--mode','lexical']);assert.equal(found.code,0,found.err);const result=found.packet.data.results[0];assert.ok(result);
   const exported=join(folder,'export.json');const exportRun=await cli(data,['export',found.packet.data.search_id,'--output',exported]);assert.equal(exportRun.code,0);const exportData=JSON.parse(await readFile(exported,'utf8'));assert.equal(exportData.includes_query,false);assert.equal(exportData.data.query_plan,undefined);

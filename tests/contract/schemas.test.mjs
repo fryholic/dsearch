@@ -34,3 +34,10 @@ test('a complete profile requires resolved engine and model identities plus an e
 });
 
 test('error reasons disclose only bounded model-stage codes, never native messages or file paths',()=>{const packet={schema_version:1,request_id:'error-reason',ok:false,error:{code:'RERANK_UNAVAILABLE',reason:'RERANK_MODEL_NOT_INSTALLED',message:'RERANK_UNAVAILABLE',retryable:false}};assert.ok(ErrorEnvelope.safeParse(packet).success);assert.equal(ErrorEnvelope.safeParse({...packet,error:{...packet.error,reason:'/private/model/path'}}).success,false);});
+
+
+import {ReconcileRequest} from '../../packages/contracts/dist/control.js';
+test('manual indexing accepts an explicit full rebuild without arbitrary engine options',()=>{
+ assert.deepEqual(ReconcileRequest.parse({}),{full:false});assert.deepEqual(ReconcileRequest.parse({full:true}),{full:true});
+ for(const value of [{full:'true'},{force:true},{dbPath:'/other'},null,[]])assert.equal(ReconcileRequest.safeParse(value).success,false);
+});

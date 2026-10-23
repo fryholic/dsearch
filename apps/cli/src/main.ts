@@ -17,7 +17,7 @@ Usage: pnpm dsearch <command> [options]
   collection preview <id> [--scope-json <json>] [--no-legacy-metadata]
   collection remove <id>
   collection enable|disable <id>
-  reconcile | sync                   Build and publish a complete generation
+  reconcile | sync [--full]          Update and publish a complete generation
   search <query> --collection <id> [--mode lexical|hybrid|deep] [--no-rerank] [--allow-degraded] [--limit 10]
   literal <text> --collection <id> [--ignore-case] [--limit 200]
   read <doc-id> --revision <id> --lines 1:20
@@ -87,7 +87,7 @@ function print(packet: Packet) {
         process.stderr.write('Partial literal results: ' + d.stop_reason + '\n');
 }
 try {
-    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, 'scope-json': { type: 'string' }, 'no-legacy-metadata': { type: 'boolean' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
+    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, 'scope-json': { type: 'string' }, 'no-legacy-metadata': { type: 'boolean' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, full: { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
     jsonOutput = !!v.json;
     if (v.help || !p.length) {
         process.stdout.write(help);
@@ -96,6 +96,7 @@ try {
     const root = resolve(v['data-root'] ?? defaultRoot()), command = p[0];
     if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp', 'jobs', 'settings', 'doctor', 'export', 'open', 'model', 'profile', 'generation'].includes(command!))
         throw new DsearchError('INVALID_REQUEST');
+    if (v.full && !['reconcile','sync'].includes(command!)) throw new DsearchError('INVALID_REQUEST');
     if (command === 'mcp') {
         if (p.length !== 1 || v.json || v.stdin) throw new DsearchError('INVALID_REQUEST');
         const { startMcp } = await import('@dsearch/app-mcp');await startMcp(root, !!v['no-start']);
@@ -216,7 +217,7 @@ try {
     else if (['reconcile', 'sync'].includes(command!)) {
         if (p.length !== 1 || v.collection)
             throw new DsearchError('INVALID_REQUEST');
-        packet = await call('POST', '/v1/reconcile', {});
+        packet = await call('POST', '/v1/reconcile', v.full ? { full: true } : {});
         if (!v['no-wait'])
             packet = await wait('/v1/jobs/' + packet.data.job_id, true);
     }

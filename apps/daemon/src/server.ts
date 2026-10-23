@@ -10,7 +10,7 @@ import { StateStore, Catalog, canonicalJSON, digest } from '@dsearch/catalog';
 import { createAlphaProfile, atomicFile } from '@dsearch/generations';
 import { ReaderPool, SourceSearch, SearchSessions } from '@dsearch/search';
 import { API_VERSION, DsearchError, ErrorCode, CollectionRequest, ReadRequest, ProfileManifest, DocumentRef } from '@dsearch/contracts';
-import { CollectionInfo, CollectionPatch, JobInfo, AppStatus, ReadResponse, ExportRequest, CoverageRequest, ModelAction, ActivateRequest, RollbackRequest, PrepareProfileRequest, retryableJobCode } from '@dsearch/contracts/control';
+import { CollectionInfo, CollectionPatch, ReconcileRequest, JobInfo, AppStatus, ReadResponse, ExportRequest, CoverageRequest, ModelAction, ActivateRequest, RollbackRequest, PrepareProfileRequest, retryableJobCode } from '@dsearch/contracts/control';
 import { PreferenceStore, exportSearch, openRegisteredDocument } from './management.js';
 import { ManagedJobs } from './jobs.js';
 import { ModelManager } from './models.js';
@@ -223,10 +223,10 @@ export async function createApplication(options: ApplicationOptions = {}) {
             if (collection && req.method === 'DELETE') { catalog.unregister(collection[1]!);sessions.invalidateCollection(collection[1]!);json(res, 200, envelope({ collection_id: collection[1], removed: true }, requestId));return; }
             if (path === '/v1/reconcile' && req.method === 'POST') {
                 const value = await body(req);
-                if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length)
-                    throw new DsearchError('INVALID_REQUEST');
+                const parsed = ReconcileRequest.safeParse(value);
+                if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
                 if (managed.busy || profiles.busy) throw new DsearchError('BUSY');
-                const job = profiles.builder.start();
+                const job = profiles.builder.start(parsed.data);
                 void job.completion.then(() => readers.sweep(), () => { });
                 json(res, 202, envelope({ job_id: job.job_id, generation_id: job.generation_id, state: 'queued' }, requestId));
                 return;
