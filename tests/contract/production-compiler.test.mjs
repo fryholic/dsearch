@@ -22,11 +22,29 @@ test('long ordinary paragraphs split at source boundaries while every byte-equiv
  for(const passage of result.passages)validateSourceMap(passage,text);
 });
 
-test('atomic code and tables keep definitions and conditions intact when retained for lexical-only search',async()=>{
+test('oversized presentation groups split tables with repeated context while retaining an indivisible code line',async()=>{
  const code='코드 정의\n\n```text\n'+('x'.repeat(2700))+'\n```\n\n코드 조건';
  const table='표 정의\n\n| 값 | 조건 |\n| --- | --- |\n'+Array(180).fill('| 한글 | 조건 😀 |').join('\n')+'\n\n표 조건';
  const text='# Code\n\n'+code+'\n\n# Table\n\n'+table;
- const result=await compileDocument({...base,text},fixtureInspector);assert.equal(result.passages.length,2);assert.ok(result.passages.every(p=>p.kind==='lexical_only'));assert.equal(primary(result.passages[0],text),code);assert.equal(primary(result.passages[1],text),table);assert.ok(result.coverage.every(b=>b.state==='lexical_only'));
+ const result=await compileDocument({...base,text},fixtureInspector),lexical=result.passages.filter(p=>p.kind==='lexical_only');assert.equal(lexical.length,1);assert.ok(primary(lexical[0],text).includes('x'.repeat(2700)));
+ const tables=result.passages.filter(p=>p.heading.includes('Table')&&p.text.includes('| --- | --- |'));assert.ok(tables.length>1);assert.ok(tables.every(p=>p.kind==='semantic'));assert.ok(tables.slice(1).every(p=>p.segments.some(s=>s.kind==='source'&&s.context&&text.slice(s.source_start,s.source_end).includes('| 값 | 조건 |'))));
+ assert.equal(tables.map(p=>primary(p,text)).join('').match(/\| 값 \| 조건 \|/g).length,1);
+ for(const p of result.passages)validateSourceMap(p,text);
+});
+
+test('fenced code chunks repeat the original language/fences as context and partition primary source',async()=>{
+ const code='````python\n'+Array.from({length:180},(_,i)=>'print("value '+i+' 한글 😀")').join('\n')+'\n````',text='# Script\n\n'+code;
+ const result=await compileDocument({...base,text},fixtureInspector);assert.ok(result.passages.length>1);assert.ok(result.passages.every(p=>p.kind==='semantic'&&p.text.includes('````python')&&p.text.includes('\n````')));assert.equal(result.passages.map(p=>primary(p,text)).join(''),code);assert.ok(result.passages.slice(1).every(p=>p.segments.some(s=>s.kind==='source'&&s.context&&text.slice(s.source_start,s.source_end)==='````python\n')));
+});
+
+test('unspaced text splits only at grapheme boundaries without altering emoji, combining marks or source bytes',async()=>{
+ const paragraph='👩‍💻e\u0301가🇰🇷'.repeat(500),text='# Graphemes\n\n'+paragraph,result=await compileDocument({...base,text},fixtureInspector),offset=text.indexOf(paragraph),boundaries=new Set([0,...[...new Intl.Segmenter(undefined,{granularity:'grapheme'}).segment(paragraph)].map(s=>s.index+s.segment.length)]);
+ assert.ok(result.passages.length>2);assert.ok(result.passages.every(p=>p.kind==='semantic'));assert.equal(result.passages.map(p=>primary(p,text)).join(''),paragraph);
+ for(const p of result.passages)for(const r of primaryIntersections(p,0,p.text.length)){assert.ok(boundaries.has(r.start-offset));assert.ok(boundaries.has(r.end-offset));}
+});
+
+test('oversized equation groups retain definitions and conditions as an explicitly lexical atomic unit',async()=>{
+ const body='정의 '+('word '.repeat(500))+'\n\n$$\nQ=dG\n$$\n\n조건 '+('word '.repeat(500)),text='# Math\n\n'+body,result=await compileDocument({...base,text},fixtureInspector);assert.equal(result.passages.length,1);assert.equal(result.passages[0].kind,'lexical_only');assert.equal(primary(result.passages[0],text),body);
 });
 
 test('passage IDs distinguish duplicate sections/documents and remain stable across revision-only changes',async()=>{
@@ -45,4 +63,10 @@ test('configured navigation is explained in coverage and input cancellation inte
  const text='# Lesson\n\nDefinition.\n\n## 목차\n\n[다음](next.md)\n\n## 본문\n\nActual explanation.';
  const result=await compileDocument({...base,text,navigation_headings:['목차']},fixtureInspector);assert.ok(result.coverage.some(b=>b.state==='excluded_navigation'));assert.ok(result.passages.every(p=>!primary(p,text).includes('[다음]')));
  await assert.rejects(compileDocument({...base,text,signal:AbortSignal.abort()},fixtureInspector),{code:'CANCELLED'});
+});
+
+
+test('splitting an oversized presentation group preserves blank lines between its original AST blocks',async()=>{
+ const code='```python\n'+Array.from({length:180},(_,i)=>'print("source '+i+'")').join('\n')+'\n```',body='Definition and context.\n\n'+code+'\n\nCondition and explanation.',text='# Group\n\n'+body,result=await compileDocument({...base,text},fixtureInspector);
+ assert.ok(result.passages.length>3);assert.ok(result.passages.every(p=>p.kind==='semantic'));assert.equal(result.passages.map(p=>primary(p,text)).join(''),body);
 });

@@ -19,13 +19,13 @@ export type Passage = {
   reason: string | null; text: string; projection_sha256: string; segments: MapSegment[]; embedding_tokens: number | null;
 };
 export type CoverageBlock = SourceSpan & { type: string; state: "semantic" | "lexical_only" | "excluded_navigation" | "failed"; reason: string | null; passages: string[] };
-export type CompiledDocument = { compiler_version: "projection-v2"; title: string; passages: Passage[]; coverage: CoverageBlock[]; metadata_range: SourceSpan | null };
+export type CompiledDocument = { compiler_version: "projection-v3"; title: string; passages: Passage[]; coverage: CoverageBlock[]; metadata_range: SourceSpan | null };
 const parser = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(remarkFrontmatter, ["yaml"]);
 const span = (node: Node): SourceSpan => ({ start: node.position!.start.offset!, end: node.position!.end.offset! });
 const textOf = (node: Node): string => node.value ?? node.children?.map(textOf).join("") ?? "";
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const boundedTitle = (text: string): string => [...text.replace(/\s+/g, " ").trim()].slice(0, 160).join("") || "문서";
-type Unit = SourceSpan & { nodes: Node[]; atomic: boolean };
+type Unit = SourceSpan & { nodes: Node[]; atomic: boolean; before?: SourceSpan[]; after?: SourceSpan[] };
 type Section = { headings: Heading[]; nodes: Node[]; navigation: boolean };
 
 function atomicUnits(nodes: Node[]): Unit[] {
@@ -78,7 +78,7 @@ export async function compileDocument(input: {
   flush();
   const passages: Passage[] = [], occurrences = new Map<string, number>();let operations = 0;
   const checkCancel = async () => { if (++operations % 8 === 0) await setImmediate();if (input.signal?.aborted) throw Object.assign(new Error("CANCELLED"), { code: "CANCELLED" }); };
-  const render = (section: Section, from: number, to: number, headingPrimary = false) => {
+  const render = (section: Section, from: number, to: number, headingPrimary = false, context?: Pick<Unit, "before" | "after">) => {
     let text = prefix;const segments: MapSegment[] = [{ projection_start: 0, projection_end: prefix.length, kind: "generated" }];
     for (const heading of section.headings) {
       const range = span(heading.node);
@@ -87,12 +87,20 @@ export async function compileDocument(input: {
       segments.push({ kind: "source", projection_start: start, projection_end: text.length, source_start: range.start, source_end: range.end, context: true });
       const separator = text.length;text += "\n\n";segments.push({ kind: "generated", projection_start: separator, projection_end: text.length });
     }
-    const start = text.length;text += input.text.slice(from, to);
-    segments.push({ kind: "source", projection_start: start, projection_end: text.length, source_start: from, source_end: to, context: false });
+    const append = (range: SourceSpan, repeated: boolean) => {
+      const start = text.length;text += input.text.slice(range.start, range.end);
+      segments.push({ kind: "source", projection_start: start, projection_end: text.length, source_start: range.start, source_end: range.end, context: repeated });
+    };
+    for (const range of context?.before ?? []) append(range, true);
+    append({ start: from, end: to }, false);
+    for (const range of context?.after ?? []) {
+      if (!text.endsWith("\n")) { const start = text.length;text += "\n";segments.push({ kind: "generated", projection_start: start, projection_end: text.length }); }
+      append(range, true);
+    }
     return { text, segments };
   };
-  const preflight = async (section: Section, from: number, to: number, headingPrimary = false) => {
-    await checkCancel();const projection = render(section, from, to, headingPrimary);
+  const preflight = async (section: Section, from: number, to: number, headingPrimary = false, context?: Pick<Unit, "before" | "after">) => {
+    await checkCancel();const projection = render(section, from, to, headingPrimary, context);
     if (projection.text.length > 2400) return { projection, check: null, safe: false };
     const check = await inspect(projection.text, title, "projection.md");
     if (!Number.isSafeInteger(check.embeddingTokens) || check.embeddingTokens < 0) throw Object.assign(new Error("COMPATIBILITY_FAILED"), { code: "COMPATIBILITY_FAILED" });
@@ -112,10 +120,57 @@ export async function compileDocument(input: {
       block.reason = block.state === "semantic" ? null : mixed ? "partially_lexical_only" : reason ?? block.reason;
     }
   };
+  const inspectUnit = (section: Section, unit: Unit) => preflight(section, unit.start, unit.end, false, unit);
+  // Fragments partition primary source bytes. Repeated table headers/fences are context only.
+  const splitBoundaries = async (section: Section, unit: Unit, boundaries: number[], header?: SourceSpan, footer?: SourceSpan): Promise<void> => {
+    const ends = [...new Set(boundaries.filter(end => end > unit.start && end <= unit.end))].sort((a, b) => a - b);
+    let start = unit.start, cursor = 0;
+    while (start < unit.end) {
+      while (ends[cursor] !== undefined && ends[cursor]! <= start) cursor++;
+      if (cursor >= ends.length) throw Object.assign(new Error("SOURCE_MAP_MISMATCH"), { code: "SOURCE_MAP_MISMATCH" });
+      const part = (end: number): Unit => ({ ...unit, start, end,
+        ...(header && start > unit.start ? { before: [header] } : {}),
+        ...(footer && end < unit.end ? { after: [footer] } : {}) });
+      let low = cursor - 1, high = ends.length;
+      while (low + 1 < high) {
+        const mid = Math.floor((low + high) / 2), check = await inspectUnit(section, part(ends[mid]!));
+        if (check.safe && check.check!.embeddingTokens <= 600) low = mid;else high = mid;
+      }
+      // A single indivisible row/line may fit the hard cap even when above the packing target.
+      const end = ends[low >= cursor ? low : cursor]!, fragment = part(end);
+      emit(section, fragment, await inspectUnit(section, fragment));start = end;
+    }
+  };
   const split = async (section: Section, unit: Unit): Promise<void> => {
-    if (unit.atomic || unit.nodes.length !== 1 || unit.nodes[0]!.type !== "paragraph") { emit(section, unit, await preflight(section, unit.start, unit.end));return; }
+    if (unit.nodes.some(node => node.type === "math")) { emit(section, unit, await inspectUnit(section, unit));return; }
+    if (unit.nodes.length > 1) {
+      // Oversized presentation groups can separate at AST boundaries; equations retain atomic context.
+      for (const [index, node] of unit.nodes.entries()) {
+        const single = { start: span(node).start, end: unit.nodes[index + 1] ? span(unit.nodes[index + 1]!).start : unit.end, nodes: [node], atomic: ["code", "table"].includes(node.type) }, checked = await inspectUnit(section, single);
+        if (checked.safe) emit(section, single, checked);else await split(section, single);
+      }
+      return;
+    }
+    const node = unit.nodes[0]!;
+    if (node.type === "table" && (node.children?.length ?? 0) > 1) {
+      const rows = node.children!.slice(1), header = { start: unit.start, end: span(rows[0]!).start };
+      await splitBoundaries(section, unit, [...rows.slice(1).map(row => span(row).start), unit.end], header);return;
+    }
+    if (node.type === "code") {
+      const source = input.text.slice(unit.start, span(node).end), opening = /^( {0,3})(`{3,}|~{3,})[^\n]*\n/.exec(source);
+      if (opening) {
+        const closingStart = source.lastIndexOf("\n") + 1, closing = source.slice(closingStart), fence = opening[2]!;
+        if (new RegExp("^ {0,3}" + fence[0] + "{" + fence.length + ",}[ \t]*$").test(closing) && closingStart >= opening[0].length) {
+          const header = { start: unit.start, end: unit.start + opening[0].length }, footer = { start: unit.start + closingStart, end: span(node).end };
+          const ends = [...source.matchAll(/\n/g)].map(match => unit.start + match.index + 1).filter(end => end > header.end && end < footer.start);
+          await splitBoundaries(section, unit, [...ends, unit.end], header, footer);return;
+        }
+      }
+      emit(section, unit, await inspectUnit(section, unit));return;
+    }
+    if (node.type !== "paragraph") { emit(section, unit, await inspectUnit(section, unit));return; }
     const boundaries = new Set<number>([unit.end]);
-    for (const child of unit.nodes[0]!.children ?? []) {
+    for (const child of node.children ?? []) {
       const range = span(child);
       if (child.type === "text") { for (const match of input.text.slice(range.start, range.end).matchAll(/\s+/g)) boundaries.add(range.start + match.index + match[0].length); }
       else boundaries.add(range.end);
@@ -129,11 +184,25 @@ export async function compileDocument(input: {
         const result = await preflight(section, start, end);
         if (result.safe && result.check!.embeddingTokens <= 600) low = mid;else high = mid;
       }
-      const end = low >= 0 ? ends[low]! : start;
-      if (end <= start) { const tail = { ...unit, start };emit(section, tail, await preflight(section, start, unit.end));break; }
+      let end = low >= 0 ? ends[low]! : start;
+      if (end <= start) {
+        // A long unspaced text run is split only at grapheme boundaries, never inside inline math/code/links.
+        const child = node.children?.find(child => child.type === "text" && span(child).start <= start && span(child).end > start);
+        if (child) {
+          const candidates: number[] = [];
+          for (const segment of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(input.text.slice(start, span(child).end))) {
+            const boundary = start + segment.index + segment.segment.length;if (boundary - start > 8192) break;candidates.push(boundary);
+          }
+          let left = -1, right = candidates.length;
+          while (left + 1 < right) { const mid = Math.floor((left + right) / 2), check = await preflight(section, start, candidates[mid]!);if (check.safe && check.check!.embeddingTokens <= 600) left = mid;else right = mid; }
+          if (left >= 0) end = candidates[left]!;
+        }
+        if (end <= start) { const tail = { ...unit, start };emit(section, tail, await preflight(section, start, unit.end));break; }
+      }
       const part = { ...unit, start, end };emit(section, part, await preflight(section, start, end));start = end;
     }
   };
+
   for (const section of sections) {
     if (section.navigation) {
       for (const node of [...section.headings.map(h => h.node), ...section.nodes]) { const block = blocks.get(span(node).start);if (block && !block.passages.length) { block.state = "excluded_navigation";block.reason = "navigation_heading"; } }
@@ -160,11 +229,11 @@ export async function compileDocument(input: {
   if (coverage.some(b => b.reason === "not_compiled")) throw Object.assign(new Error("SOURCE_MAP_MISMATCH"), { code: "SOURCE_MAP_MISMATCH" });
   const byId = new Map(passages.map(p => [p.passage_id, p]));
   for (const block of coverage.filter(b => b.state !== "excluded_navigation")) {
-    const spans = block.passages.map(id => byId.get(id)!).flatMap(p => p.segments.flatMap(s => s.kind === "source" && s.source_start < block.end && s.source_end > block.start ? [{ start: Math.max(s.source_start, block.start), end: Math.min(s.source_end, block.end) }] : [])).sort((a, b) => a.start - b.start);
+    const spans = block.passages.map(id => byId.get(id)!).flatMap(p => p.segments.flatMap(s => s.kind === "source" && (block.type === "heading" || !s.context) && s.source_start < block.end && s.source_end > block.start ? [{ start: Math.max(s.source_start, block.start), end: Math.min(s.source_end, block.end) }] : [])).sort((a, b) => a.start - b.start);
     let end = block.start;for (const range of spans) { if (range.start > end) throw new Error("SOURCE_MAP_MISMATCH");end = Math.max(end, range.end); }
     if (end !== block.end) throw new Error("SOURCE_MAP_MISMATCH");
   }
-  return { compiler_version: "projection-v2", title, passages, coverage, metadata_range: metadataNode ? span(metadataNode) : null };
+  return { compiler_version: "projection-v3", title, passages, coverage, metadata_range: metadataNode ? span(metadataNode) : null };
 }
 
 export function validateSourceMap(passage: Passage, source: string): void {

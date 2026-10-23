@@ -15,9 +15,9 @@ test('manual generation publishes only fully verified sources and preserves the 
  try{
   const builder=new GenerationBuilder(catalog,options),handle=builder.start();assert.equal(builder.getJob(handle.job_id).state,'queued');assert.throws(()=>builder.start(),{code:'BUSY'});
   const built=await handle.completion;assert.equal(built.epoch,1);assert.equal(builder.getJob(handle.job_id).state,'succeeded');assert.equal(builder.busy,false);
-  assert.equal(built.coverage.find(d=>catalog.document(d.doc_id).relative_path==='bad.md').state,'failed');assert.equal(built.coverage.filter(d=>d.state==='included').length,1);assert.equal(built.coverage.filter(d=>d.state==='lexical_only').length,1);
-  const slot=state.db.prepare('SELECT * FROM active_slot').get();assert.equal(slot.generation_id,built.generation_id);const directory=join(state.root,'generations',built.generation_id);const manifest=await verifySeal(directory,built.manifest_sha256);assert.equal(manifest.passages,2);
-  const mappings=JSON.parse(await readFile(join(directory,'mappings.json'),'utf8'));assert.equal(mappings.length,2);assert.ok(mappings.every(p=>!('text' in p)));assert.ok(mappings.every(p=>p.revision_id));
+  assert.equal(built.coverage.find(d=>catalog.document(d.doc_id).relative_path==='bad.md').state,'failed');assert.equal(built.coverage.filter(d=>d.state==='included').length,1);assert.equal(built.coverage.filter(d=>d.state==='partial').length,1);
+  const slot=state.db.prepare('SELECT * FROM active_slot').get();assert.equal(slot.generation_id,built.generation_id);const directory=join(state.root,'generations',built.generation_id);const manifest=await verifySeal(directory,built.manifest_sha256);assert.equal(manifest.passages,4);
+  const mappings=JSON.parse(await readFile(join(directory,'mappings.json'),'utf8'));assert.equal(mappings.length,4);assert.ok(mappings.every(p=>!('text' in p)));assert.ok(mappings.every(p=>p.revision_id));
   assert.equal(state.db.prepare('SELECT status FROM profiles').get().status,'validated');
   // Unknown files beneath an inaccessible directory must never look like a complete index.
   await mkdir(join(source,'blocked'));await writeFile(join(source,'blocked','unknown.md'),'# hidden during first scan');await chmod(join(source,'blocked'),0);
