@@ -6,6 +6,7 @@ process.on('message',message=>{
  if(type!=='request')return;
  if(payload.op==='stall') {Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10000);reply(true,'late');}
  else if(payload.op==='wait')timers.set(id,setTimeout(()=>{timers.delete(id);reply(true,'done');},1000));
+ else if(payload.op==='progress') {let completed=0;const tick=()=>{process.send({version:1,id,type:'progress',value:{phase:'embedding-batch',completed:++completed}});if(completed===8){timers.delete(id);reply(true,'done');}else timers.set(id,setTimeout(tick,25));};timers.set(id,setTimeout(tick,25));}
  else if(payload.op==='exit')process.exit(2);
  else {console.error('private input that must not be forwarded');reply(true,payload);}
 });

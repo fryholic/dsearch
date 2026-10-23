@@ -111,8 +111,11 @@ export class GenerationBuilder {
         completed++;
       }
       this.phase(jobId, "indexing", { passages: mappings.length });await builder.invoke("update", {}, { signal });
-      this.phase(jobId, "embedding", { semantic_passages: mappings.filter(p => p.kind === "semantic").length });
-      const embedded = await builder.invoke<EngineResponse<{ results: { errors: number }[] }>>("embed", {}, { signal });
+      const semanticPassages = mappings.filter(p => p.kind === "semantic").length;
+      this.phase(jobId, "embedding", { completed: 0, total: semanticPassages });
+      const embedded = await builder.invoke<EngineResponse<{ results: { errors: number }[] }>>("embed", {}, { signal, timeoutMode: "idle", onProgress: event => {
+        if (event.phase === "embedding-batch") this.phase(jobId, "embedding", { completed: Math.min(event.completed, semanticPassages), total: semanticPassages });
+      } });
       if (embedded.result.results.some(r => r.errors !== 0)) {
         for (const doc of coverage) if (["included", "partial"].includes(doc.state)) { doc.state = "failed";doc.reason = "failed_embedding"; }
         state.db.prepare("UPDATE generations SET coverage_json=? WHERE generation_id=?").run(canonicalJSON(coverage), genId);

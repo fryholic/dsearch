@@ -85,13 +85,17 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
   if (role === "reader" && ["update", "embed"].includes(method)) throw new DsearchError("SCOPE_DENIED");
   const stats = strict ? sdk.compatibilityStats() : {};
   requestStats = stats;
+  let embeddingOffset = 0;
   const operation = async (): Promise<unknown> => {
     switch (method) {
       case "update": return current.update();
       case "embed": {
         if (role === "probe") return current.embed({ maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
         const results = [];
-        for (const collection of semanticCollections) results.push(await current.embed({ collection, maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" }));
+        for (const collection of semanticCollections) {
+          const result = await current.embed({ collection, maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" }) as { chunksEmbedded: number; chunksCopied: number };
+          results.push(result);embeddingOffset += result.chunksEmbedded + result.chunksCopied;
+        }
         return { results };
       }
       case "inspect": return current.dsearchInspectProjection(string(args.text), string(args.title), string(args.file));
@@ -204,7 +208,10 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
   };
   const start = performance.now();
   const result = strict ? await sdk.runDsearchRequest({ signal, cache, stats,
-    onProgress: (value: unknown) => send({ version: 1, id, type: "progress", value }) }, operation) : await operation();
+    onProgress: (value: unknown) => {
+      const event = value as { phase: string; completed: number };
+      send({ version: 1, id, type: "progress", value: method === "embed" && event.phase === "embedding-batch" ? { ...event, completed: embeddingOffset + event.completed } : value });
+    } }, operation) : await operation();
   return { result, stats, duration_ms: performance.now() - start, rss_bytes: process.memoryUsage().rss,
     resource_usage: process.resourceUsage() };
 }

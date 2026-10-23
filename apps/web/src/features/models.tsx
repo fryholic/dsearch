@@ -7,7 +7,7 @@ import { message } from '../api.js';
 export function JobProgress({ job }: { job: JobInfo | undefined }) {
   if (!job) return null;const p = job.progress;
   return <div className="job-progress" role="status"><p>{phaseLabel(job.phase)} · {phaseLabel(job.state)}</p>
-    {job.phase === 'downloading-model' && p.total_bytes ? <><label>현재 모델 파일 · {Math.round((p.bytes ?? 0) / 1048576)} / {Math.round(p.total_bytes / 1048576)}MiB<progress value={p.bytes ?? 0} max={p.total_bytes}/></label></> : <p className="caption">{Object.entries(p).map(([key, value]) => key + ': ' + value).join(' · ')}</p>}
+    {job.phase === 'downloading-model' && p.total_bytes ? <><label>현재 모델 파일 · {Math.round((p.bytes ?? 0) / 1048576)} / {Math.round(p.total_bytes / 1048576)}MiB<progress value={p.bytes ?? 0} max={p.total_bytes}/></label></> : p.completed !== undefined && p.total !== undefined ? <p className="caption">{job.phase === 'embedding' ? '검색 구간' : '처리'} {p.completed} / {p.total}{job.phase === 'embedding' ? '개 준비' : ''}</p> : <p className="caption">{Object.entries(p).map(([key, value]) => key + ': ' + value).join(' · ')}</p>}
     {job.error_code ? <p className="error-text">{message(new DsearchError(job.error_code))}</p> : null}</div>;
 }
 export function Models({ catalog, models, status, start, setup = false, canBuild = true }: {
