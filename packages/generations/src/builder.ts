@@ -2,7 +2,7 @@ import { HeavyLane } from "@dsearch/runtime";
 import { randomUUID } from "node:crypto";
 import { mkdir, chmod } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
-import { Catalog, canonicalJSON, digest } from "@dsearch/catalog";
+import { Catalog, canonicalJSON, digest, legacyNavigationHeadings } from "@dsearch/catalog";
 import { compileDocument, type Passage, type CoverageBlock, type CompiledDocument } from "@dsearch/compiler";
 import { DsearchError, type ProfileManifest } from "@dsearch/contracts";
 import { JobInfo } from "@dsearch/contracts/control";
@@ -95,7 +95,7 @@ export class GenerationBuilder {
         const source = await this.catalog.readDocument(doc.doc_id, doc.latest_revision_id), collection = collections.find(c => c.collection_id === doc.collection_id)!;
         let compiled: CompiledDocument;
         try {
-          compiled = await compileDocument({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, text: source.text, metadata: source.metadata, fallback_title: basename(doc.relative_path, extname(doc.relative_path)), navigation_headings: JSON.parse(collection.scope_json).preset === "learning" ? ["목차", "학습 탐색", "이전·다음"] : [], signal }, async (text, title, file) => (await builder.invoke<EngineResponse<{ embeddingTokens: number; embeddingChunks: number; searchChunks: number; safe: boolean }>>("inspect", { text, title, file }, { signal })).result);
+          compiled = await compileDocument({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, text: source.text, metadata: source.metadata, fallback_title: basename(doc.relative_path, extname(doc.relative_path)), navigation_headings: legacyNavigationHeadings(JSON.parse(collection.scope_json).preset), signal }, async (text, title, file) => (await builder.invoke<EngineResponse<{ embeddingTokens: number; embeddingChunks: number; searchChunks: number; safe: boolean }>>("inspect", { text, title, file }, { signal })).result);
         } catch (e) {
           if (!e || typeof e !== "object" || !("code" in e) || e.code !== "PARSE_ERROR") throw e;
           coverage.push({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, collection_id: doc.collection_id, state: "failed", reason: "parse_error", coverage: [{ start: source.bodyStart, end: source.text.length, type: "document", state: "failed", reason: "parse_error", passages: [] }] });completed++;continue;

@@ -4,6 +4,8 @@ import { join, resolve, matchesGlob } from "node:path";
 import { CollectionRequest, ReadRequest, DsearchError } from "@dsearch/contracts";
 import { CollectionPatch } from '@dsearch/contracts/control';
 import { StateStore } from "./database.js";
+import { isLegacySourceDirectory } from "./legacy-scope.js";
+export { legacyNavigationHeadings } from "./legacy-scope.js";
 import { canonicalJSON, digest, within, pathEligibility, metadataEligibility, type ScopePolicy, type Eligibility } from "./policy.js";
 import { fileKey, checkRoot, readStableSource } from "./files.js";
 export { StateStore } from "./database.js";
@@ -118,7 +120,7 @@ export class Catalog {
           if (info.isDirectory()) {
             const hidden = child.split("/").some(x => x.startsWith(".") || x === "node_modules");
             const excluded = policy.exclude.some(glob => glob.endsWith("/**") && matchesGlob(child, glob.slice(0, -3)));
-            const product = within(this.excludedDataRoot, full), source = policy.preset === "learning" && child.split("/").includes("Sources");
+            const product = within(this.excludedDataRoot, full), source = isLegacySourceDirectory(child, policy.preset);
             if (hidden || excluded || product || source) boundaries.push({ path: child, eligibility: source ? "excluded_source" : "excluded_pattern", reason: product ? "product_data" : hidden ? "hidden_or_dependency_path" : source ? "source_directory" : "exclude_pattern", incomplete: false });
             else await walk(child, depth + 1);
             continue;

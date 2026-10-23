@@ -106,3 +106,18 @@ test('v2 product state migrates scan completeness without altering existing sour
  const {state,folder,root,catalog,put}=await fixture(t);await put('one.md','# one');const col=await catalog.addCollection({name:'migration',root});await catalog.reconcile(col.collection_id);const id=current(catalog,col.collection_id)[0].doc_id;state.db.exec('DROP TABLE collection_scans; PRAGMA user_version=2;');
  const reopened=await StateStore.open(join(folder,'data'));try{const migrated=new Catalog(reopened);assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version,4);assert.equal(migrated.scanStatus(col.collection_id).status,'unscanned');assert.equal(current(migrated,col.collection_id)[0].doc_id,id);await migrated.reconcile(col.collection_id);assert.equal(migrated.scanStatus(col.collection_id).status,'complete');}finally{reopened.close();}
 });
+
+
+test('legacy scope extraction preserves general and existing learning boundaries', async () => {
+ const {pathEligibility}=await import('../../packages/catalog/dist/policy.js');
+ const {legacyNavigationHeadings}=await import('../../packages/catalog/dist/index.js');
+ for(const preset of ['general','learning']) {
+  const policy={preset,include:['**/*.md'],exclude:[],root_file_key:'fixture'};
+  for(const path of ['documents/backup.md','30_Resources/Networking/lesson.md','30_resources/Crypto/lesson.md'])
+   assert.equal(pathEligibility(path,policy).eligibility,preset==='general'?'eligible':'excluded_pattern');
+  assert.equal(pathEligibility('30_Resources/Crypto/lesson.md',policy).eligibility,'eligible');
+  assert.equal(pathEligibility('30_Resources/Crypto/Sources/raw.md',policy).eligibility,preset==='general'?'eligible':'excluded_source');
+ }
+ assert.deepEqual(legacyNavigationHeadings('general'),[]);
+ assert.deepEqual(legacyNavigationHeadings('learning'),['목차','학습 탐색','이전·다음']);
+});

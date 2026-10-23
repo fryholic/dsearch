@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { matchesGlob, relative, isAbsolute, sep } from "node:path";
 import { parseDocument } from "yaml";
+import { legacyLearningPath, legacyLearningMetadata } from "./legacy-scope.js";
 import { DsearchError, type CollectionRequest } from "@dsearch/contracts";
 
 export function canonicalJSON(value: unknown): string {
@@ -55,17 +56,10 @@ export function pathEligibility(path: string, policy: ScopePolicy): { eligibilit
   if (parts.includes("node_modules")) return { eligibility: "excluded_pattern", reason: "dependency_directory" };
   if (policy.exclude.some(glob => matchesGlob(path, glob))) return { eligibility: "excluded_pattern", reason: "exclude_pattern" };
   if (!policy.include.some(glob => matchesGlob(path, glob))) return { eligibility: "excluded_pattern", reason: "include_pattern" };
-  if (policy.preset === "learning") {
-    if (parts.includes("Sources")) return { eligibility: "excluded_source", reason: "source_directory" };
-    if (!["30_Resources/ASN.1/", "30_Resources/Crypto/", "30_Resources/V2X-Crypto/"].some(prefix => path.startsWith(prefix))) return { eligibility: "excluded_pattern", reason: "outside_learning_scope" };
-  }
+  if (policy.preset === "learning") return legacyLearningPath(path);
   return { eligibility: "eligible", reason: "eligible" };
 }
 export function metadataEligibility(metadata: Metadata, policy: ScopePolicy): { eligibility: Eligibility; reason: string } {
   if (policy.preset !== "learning") return { eligibility: "eligible", reason: "eligible" };
-  const role = metadata.role ?? metadata.type;
-  if (role === "source") return { eligibility: "excluded_source", reason: "source_role" };
-  if (!["lesson", "concept", "example"].includes(String(role))) return { eligibility: "excluded_role", reason: "learning_role" };
-  if (metadata.status === "superseded") return { eligibility: "excluded_status", reason: "superseded" };
-  return { eligibility: "eligible", reason: "eligible" };
+  return legacyLearningMetadata(metadata);
 }
