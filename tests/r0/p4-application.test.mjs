@@ -6,7 +6,7 @@ import {ReaderPool,SourceSearch} from '../../packages/search/dist/index.js';
 import {SearchRequest} from '../../packages/contracts/dist/index.js';
 import {createApplication} from '../../apps/daemon/dist/index.js';
 const root=resolve(import.meta.dirname,'../..'),sleep=ms=>new Promise(r=>setTimeout(r,ms));
-test('P4 actual product hybrid, rerank, supplemental evidence, related/compare, model fallback and cancellation',async t=>{
+test('actual product hybrid, rerank, supplemental evidence, related/compare, model fallback and cancellation',async t=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/p4-')),sources=join(folder,'source'),models=join(folder,'models');await mkdir(sources);await mkdir(models);
  const registry=JSON.parse(await readFile(join(root,'vendor/models/registry.json'),'utf8')).models;
  for(const model of registry.filter(m=>m.role!=='reference'))await link(join(root,'.local/models',model.filename),join(models,model.filename));

@@ -45,7 +45,7 @@ export async function readStableSource(root: string, path: string, policy: Scope
       if (offset !== bytes.length || !same(before, after) || !same(after, atPath)) throw new DsearchError("SOURCE_PENDING");
       let normalized;
       try { normalized = normalizeSource(bytes); } catch { throw new DsearchError("UNSUPPORTED_ENCODING"); }
-      const parsed = parseMetadata(normalized.text);
+      const parsed = parseMetadata(normalized.text, policy.version === 2 ? policy.metadata_mode ?? "general" : "legacy-v1");
       return { ...normalized, ...parsed, bytes: bytes.length, fileKey: fileKey(after) };
     } finally { await handle.close(); }
   } catch (e) {

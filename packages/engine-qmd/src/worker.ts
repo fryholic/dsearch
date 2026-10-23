@@ -42,7 +42,7 @@ function compileFilter(node: Filter): unknown {
   if ("or" in node) return group("or", node.or.map(compileFilter));
   if ("not" in node) return { operator: "not", operand: compileFilter(node.not) };
   const field = node.field === "document_key" ? "document_key" : node.field.slice("metadata.".length);
-  if (!["document_key", "role", "type", "status", "topics"].includes(field)) throw new DsearchError("INVALID_REQUEST");
+  if (!/^[a-z][a-z0-9_.-]{0,63}$/.test(field)) throw new DsearchError("INVALID_REQUEST");
   if (Array.isArray(node.value) && node.value.length > 64) return group(node.operator === "in" ? "or" : "and", [
     { field, operator: node.operator, value: node.value.slice(0, 64) }, { field, operator: node.operator, value: node.value.slice(64) }]);
   return { field, operator: node.operator, value: node.value };
@@ -141,12 +141,12 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
         try {
           try { db.prepare("SELECT result FROM llm_cache").get(); } catch { guardConfirmed = true; }
           touches = 0;
-          await current.dsearchRerank("r0 cache audit signing bytes", [{ file: "one", text: "Canonical encoding fixes signing input bytes." }]);
+          await current.dsearchRerank("cache audit neutral query", [{ file: "one", text: "A backup policy defines file retention." }]);
           const functions = await import(pathToFileURL(join(engineRoot, "dist/store.js")).href) as {
             expandQuery(query: string, model: string | undefined, db: unknown, llm: unknown): Promise<unknown>;
           };
           const stub = { expandQuery: async () => { expansionStubCalls++; return [{ type: "vec", text: "synthetic expanded variant" }]; } };
-          for (let i = 0; i < 2; i++) await functions.expandQuery("r0-expansion-cache-sentinel", undefined, db, stub);
+          for (let i = 0; i < 2; i++) await functions.expandQuery("expansion-cache-audit-sentinel", undefined, db, stub);
           return { cacheRowsBefore: before, cacheRowsAfter: rows(), databaseCacheTouches: touches,
             sqlGuardConfirmed: guardConfirmed, expansionStubCalls, expansionNativeModelTested: false };
         } finally { db.prepare = original; }

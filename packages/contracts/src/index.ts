@@ -81,11 +81,21 @@ export const RelatedRequest = z.strictObject({ source: DocumentRef.extend({ loca
 export type RelatedRequest = z.infer<typeof RelatedRequest>;
 export const CompareRequest = z.strictObject({ left: DocumentRef, right: DocumentRef, query: z.string().trim().min(1).max(8192).refine(v => new TextEncoder().encode(v).length <= 8192), mode: Mode, rerank: z.boolean(), allow_degraded: z.boolean().default(false), candidate_limit: z.number().int().min(1).max(80).default(40), expected_epoch: z.number().int().positive().nullable().optional() }).refine(v => v.left.doc_id !== v.right.doc_id && (v.mode !== 'lexical' || !v.rerank));
 export type CompareRequest = z.infer<typeof CompareRequest>;
+export const CollectionMetadataFilter = MetadataFilter.refine(filter => {
+  const fields = (node: Filter): boolean => 'and' in node ? node.and.every(fields) : 'or' in node ? node.or.every(fields) : 'not' in node ? fields(node.not) : node.field.startsWith('metadata.');
+  return fields(filter);
+}, 'Collection rules must use metadata fields');
+export const PathPrefixes = z.array(z.string().min(1).max(512).refine(p => !p.startsWith('/') && !p.includes('\\') && p.endsWith('/') && p.split('/').slice(0, -1).every(part => part && part !== '.' && part !== '..' && !/[?*{}[\]]/.test(part)), 'Use a relative folder path ending in /')).max(32);
+export const NavigationHeadings = z.array(z.string().trim().min(1).max(256)).max(64);
+export const CollectionRuleFields = {
+  path_prefixes: PathPrefixes.default([]), metadata_filter: CollectionMetadataFilter.nullable().default(null), navigation_headings: NavigationHeadings.default([]),
+};
 export const CollectionRequest = z.strictObject({
   name: z.string().trim().min(1).max(80), root: z.string().min(1).max(4096),
-  preset: z.enum(["general", "learning"]).default("general"),
+  preset: z.literal("general").default("general"),
+  ...CollectionRuleFields,
   include: z.array(z.string().max(512)).max(32).default(["**/*.md", "**/*.markdown"]),
-  exclude: z.array(z.string().max(512)).max(64).default([]),
+  exclude: z.array(z.string().max(512)).max(128).default([]),
 });
 export type CollectionRequest = z.infer<typeof CollectionRequest>;
 export const JobState = z.enum(["queued", "running", "succeeded", "obsolete", "retry_wait", "failed", "cancel_requested", "cancelled"]);

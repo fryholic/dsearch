@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { API_VERSION } from "@dsearch/contracts";
 export {createApplication,type ApplicationOptions} from './server.js';
 
-/** P0 status surface. Search and collection mutation APIs are implemented in P3. */
+/** Minimal authenticated diagnostic server; the application API is in server.ts. */
 export async function createDiagnosticServer(status: () => unknown) {
   const token = randomBytes(32).toString("base64url");
   let authority = "";

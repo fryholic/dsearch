@@ -10,7 +10,7 @@ export async function createFixture(folder){
  const digest=createHash('sha256').update(corpusBytes).digest('hex');if(digest!==manifest.corpus_sha256)throw new Error('Evaluation fixture changed after freezing');
  const corpus=JSON.parse(corpusBytes.toString('utf8'));
  const splits=validateEvaluationSplit(corpus.queries.map(q=>({id:q.id,split:q.split,groups:Object.keys(q.relevance).map(id=>corpus.documents.find(d=>d.id===id).group)})),false);
- if(splits.tuning!==20||splits.holdout!==0)throw new Error('R0 development split changed');
+ if(splits.tuning!==20||splits.holdout!==0)throw new Error('Frozen synthetic development split changed');
  await mkdir(join(folder,'raw'),{recursive:true});await mkdir(join(folder,'projection'),{recursive:true});
  const rawMap={},projectionMap={};let mapped=0;
  for(const doc of corpus.documents){

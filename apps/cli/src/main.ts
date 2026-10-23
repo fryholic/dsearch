@@ -11,9 +11,10 @@ const help = `dsearch 0.1 alpha · QMD 2.8.3
 Usage: pnpm dsearch <command> [options]
   serve start|status|stop             Local loopback service
   ui [--print-url]                    Open the authenticated GUI
-  collection add <folder> --name <name> [--preset general|learning]
+  collection add <folder> --name <name> [--preset general] [--scope-json <json>]
   collection list
   collection preview <folder> --name <name> [--include <glob>] [--exclude <glob>]
+  collection preview <id> [--scope-json <json>] [--no-legacy-metadata]
   collection remove <id>
   collection enable|disable <id>
   reconcile | sync                   Build and publish a complete generation
@@ -28,7 +29,7 @@ Usage: pnpm dsearch <command> [options]
   profile activate <profile-id> --generation <generation-id> [--expected-epoch N]
   generation list|rollback [generation-id] [--wait]
   jobs list|get|cancel|retry [id]
-  collection update <id> [--name <name>] [--include <glob>] [--exclude <glob>]
+  collection update <id> [--name <name>] [--include <glob>] [--exclude <glob>] [--scope-json <json>] [--no-legacy-metadata]
   collection coverage <id>
   settings get|set [--theme system|light|dark] [--mode lexical|hybrid] [--rerank|--no-rerank]
                   [--candidate-limit N] [--allow-degraded|--no-degraded]
@@ -86,7 +87,7 @@ function print(packet: Packet) {
         process.stderr.write('Partial literal results: ' + d.stop_reason + '\n');
 }
 try {
-    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
+    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, 'scope-json': { type: 'string' }, 'no-legacy-metadata': { type: 'boolean' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
     jsonOutput = !!v.json;
     if (v.help || !p.length) {
         process.stdout.write(help);
@@ -192,12 +193,20 @@ try {
         else throw new DsearchError('INVALID_REQUEST');
     }
     else if (command === 'collection') {
+        let scopeOptions: Record<string, unknown> = {};
+        if (v['scope-json']) {
+            try { scopeOptions = JSON.parse(v['scope-json']); } catch { throw new DsearchError('INVALID_REQUEST'); }
+            if (!scopeOptions || typeof scopeOptions !== 'object' || Array.isArray(scopeOptions) || Object.keys(scopeOptions).some(k => !['include','exclude','path_prefixes','metadata_filter','navigation_headings'].includes(k))) throw new DsearchError('INVALID_REQUEST');
+        }
+        const changes = { ...scopeOptions, ...(v.name ? { name: v.name } : {}), ...(v.preset ? { preset: v.preset } : {}), ...(v.include ? { include: v.include } : {}), ...(v.exclude ? { exclude: v.exclude } : {}), ...(v['no-legacy-metadata'] ? { legacy_compatibility: false } : {}) };
+
         if (p[1] === 'list' && p.length === 2)
             packet = await call('GET', '/v1/collections');
+        else if (p[1] === 'preview' && p.length === 3 && !v.name && Identifier.safeParse(p[2]).success) packet = await call('POST', '/v1/collections/' + p[2] + '/preview', checked(CollectionPatch, changes));
         else if (['add', 'preview'].includes(p[1] ?? '') && p.length === 3)
-            packet = await call('POST', p[1] === 'preview' ? '/v1/collections/preview' : '/v1/collections', checked(CollectionRequest, { name: v.name, root: resolve(p[2]!), preset: v.preset ?? 'general', ...(v.include ? { include: v.include } : {}), ...(v.exclude ? { exclude: v.exclude } : {}) }));
+            packet = await call('POST', p[1] === 'preview' ? '/v1/collections/preview' : '/v1/collections', checked(CollectionRequest, { root: resolve(p[2]!), ...changes }));
         else if (p[1] === 'remove' && p.length === 3 && Identifier.safeParse(p[2]).success) packet = await call('DELETE', '/v1/collections/' + p[2]);
-        else if (p[1] === 'update' && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call('PATCH', '/v1/collections/' + p[2], checked(CollectionPatch, { ...(v.name ? { name: v.name } : {}), ...(v.preset ? { preset: v.preset } : {}), ...(v.include ? { include: v.include } : {}), ...(v.exclude ? { exclude: v.exclude } : {}) }));
+        else if (p[1] === 'update' && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call('PATCH', '/v1/collections/' + p[2], checked(CollectionPatch, changes));
         else if (p[1] === 'coverage' && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) packet = await call('POST', '/v1/collections/' + p[2] + '/coverage', {});
         else if (['enable', 'disable'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!))
             packet = await call('PATCH', '/v1/collections/' + p[2], { enabled: p[1] === 'enable' });

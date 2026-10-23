@@ -1,5 +1,17 @@
+export const POLICY_MIGRATION_SCHEMA = String.raw`CREATE TABLE IF NOT EXISTS scope_migrations (
+  collection_id TEXT PRIMARY KEY REFERENCES collections(collection_id),
+  previous_scope_json TEXT NOT NULL,
+  previous_scope_fp TEXT NOT NULL,
+  backup_file TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('unverified','matched','changed')),
+  checked_entries INTEGER NOT NULL DEFAULT 0,
+  reindexed INTEGER NOT NULL DEFAULT 0 CHECK(reindexed IN (0,1)),
+  reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN (0,1))
+);
+`;
+
 export const STATE_SCHEMA = String.raw`
--- schema: state-v4
+-- schema: state-v5
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE collections (
@@ -177,7 +189,8 @@ CREATE TABLE evaluation_runs (
   created_at TEXT NOT NULL
 );
 
+${POLICY_MIGRATION_SCHEMA}
 CREATE TABLE catalog_meta (slot INTEGER PRIMARY KEY CHECK(slot=1), source_seq INTEGER NOT NULL CHECK(source_seq>=0));
 INSERT INTO catalog_meta VALUES (1,0);
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 `;

@@ -6,7 +6,7 @@ import { CollectionPatch } from '@dsearch/contracts/control';
 import { StateStore } from "./database.js";
 import { isLegacySourceDirectory } from "./legacy-scope.js";
 export { legacyNavigationHeadings } from "./legacy-scope.js";
-import { canonicalJSON, digest, within, pathEligibility, metadataEligibility, type ScopePolicy, type Eligibility } from "./policy.js";
+import { canonicalJSON, digest, within, pathEligibility, metadataEligibility, newScopePolicy, type ScopePolicy, type Eligibility } from "./policy.js";
 import { fileKey, checkRoot, readStableSource } from "./files.js";
 export { StateStore } from "./database.js";
 export { canonicalJSON, digest, within, parseMetadata, type Metadata, type Eligibility, type ScopePolicy } from "./policy.js";
@@ -43,12 +43,12 @@ export class Catalog {
       root = await realpath(resolve(request.root));const info = await lstat(root, { bigint: true });
       if (!info.isDirectory() || within(this.excludedDataRoot, root)) throw new Error("Invalid source root");key = fileKey(info);
     } catch { throw new DsearchError("SCOPE_DENIED"); }
-    const policy: ScopePolicy = { preset: request.preset, include: request.include, exclude: request.exclude, root_file_key: key };
+    const policy = newScopePolicy(request, key);
     const scope = canonicalJSON(policy);
     const detached = this.state.db.prepare('SELECT c.* FROM collections c JOIN collection_registrations r USING(collection_id) WHERE c.root_path=? AND r.removed=1 ORDER BY r.detached_at DESC').all(root) as Collection[];
     const prior = detached.find(c => (JSON.parse(c.scope_json) as ScopePolicy).root_file_key === key), id = prior?.collection_id ?? randomUUID();
     if (this.listCollections().some(c => c.name === request.name || c.root_path === root)) throw new DsearchError("INVALID_REQUEST");
-    this.state.transaction(() => { if (prior) { this.state.db.prepare('UPDATE collections SET name=?,scope_json=?,scope_fp=?,enabled=1 WHERE collection_id=?').run(request.name, scope, digest(scope), id);this.state.db.prepare('DELETE FROM collection_registrations WHERE collection_id=?').run(id); }
+    this.state.transaction(() => { if (prior) { this.state.db.prepare('UPDATE collections SET name=?,scope_json=?,scope_fp=?,enabled=1 WHERE collection_id=?').run(request.name, scope, digest(scope), id);this.state.db.prepare('DELETE FROM collection_registrations WHERE collection_id=?').run(id);this.state.db.prepare("UPDATE scope_migrations SET reviewed=1,status='matched',reindexed=0 WHERE collection_id=?").run(id); }
       else this.state.db.prepare("INSERT INTO collections VALUES (?,?,?,?,?,1,?)").run(id, request.name, root, scope, digest(scope), now());this.state.advance(); });
     return this.collection(id);
   }
@@ -60,10 +60,10 @@ export class Catalog {
   patch(id: string, input: unknown): Collection {
     const row = this.requireRegistered(id), patch = CollectionPatch.safeParse(input);if (!patch.success) throw new DsearchError('INVALID_REQUEST');
     const prior = JSON.parse(row.scope_json) as ScopePolicy, { name = row.name, enabled = !!row.enabled, ...scopePatch } = patch.data;
-    const parsed = CollectionRequest.safeParse({ name, root: row.root_path, preset: prior.preset, include: prior.include, exclude: prior.exclude, ...scopePatch });
+    const parsed = CollectionRequest.safeParse({ name, root: row.root_path, preset: "general", include: prior.include, exclude: prior.exclude, path_prefixes: prior.path_prefixes, metadata_filter: prior.metadata_filter, navigation_headings: prior.navigation_headings, ...Object.fromEntries(Object.entries(scopePatch).filter(([key]) => key !== "legacy_compatibility")) });
     if (!parsed.success || this.listCollections().some(c => c.collection_id !== id && c.name === name)) throw new DsearchError('INVALID_REQUEST');
-    const policy: ScopePolicy = { preset: parsed.data.preset, include: parsed.data.include, exclude: parsed.data.exclude, root_file_key: prior.root_file_key }, scope = canonicalJSON(policy);
-    this.state.transaction(() => { this.state.db.prepare('UPDATE collections SET name=?,enabled=?,scope_json=?,scope_fp=? WHERE collection_id=?').run(parsed.data.name, Number(enabled), scope, digest(scope), id);if (scope !== row.scope_json || Number(enabled) !== row.enabled) this.state.advance(); });
+    const policy = newScopePolicy(parsed.data, prior.root_file_key, prior.metadata_mode === "legacy-v1" && patch.data.legacy_compatibility !== false), scope = canonicalJSON(policy);
+    this.state.transaction(() => { this.state.db.prepare('UPDATE collections SET name=?,enabled=?,scope_json=?,scope_fp=? WHERE collection_id=?').run(parsed.data.name, Number(enabled), scope, digest(scope), id);if (scope !== row.scope_json) this.state.db.prepare("UPDATE scope_migrations SET reviewed=1,status='matched',reindexed=0 WHERE collection_id=?").run(id);if (scope !== row.scope_json || Number(enabled) !== row.enabled) this.state.advance(); });
     return this.collection(id);
   }
   setEnabled(id: string, enabled: boolean): void { this.patch(id, { enabled }); }
@@ -73,13 +73,44 @@ export class Catalog {
     const row = this.collection(id);if (this.state.db.prepare('SELECT removed FROM collection_registrations WHERE collection_id=?').get(id)?.removed) return;
     this.state.transaction(() => { this.state.db.prepare('INSERT INTO collection_registrations VALUES (?,1,?,?) ON CONFLICT(collection_id) DO UPDATE SET removed=1,previous_name=excluded.previous_name,detached_at=excluded.detached_at').run(id, row.name, now());this.state.db.prepare('UPDATE collections SET enabled=0,name=? WHERE collection_id=?').run(id + '-removed', id);this.state.advance(); });
   }
+  migrationInfo(id: string) {
+    const row = this.state.db.prepare('SELECT status,checked_entries,reindexed,reviewed FROM scope_migrations WHERE collection_id=?').get(id);
+    return row ? { status: row.status as 'unverified' | 'matched' | 'changed', checked_entries: Number(row.checked_entries), reindex_required: !row.reindexed, reviewed: !!row.reviewed } : null;
+  }
+  get policyUpgradePending(): boolean {
+    return !!this.state.db.prepare('SELECT 1 FROM scope_migrations m JOIN collections c USING(collection_id) LEFT JOIN collection_registrations r USING(collection_id) WHERE m.reindexed=0 AND c.enabled=1 AND COALESCE(r.removed,0)=0 LIMIT 1').get();
+  }
+  markPoliciesIndexed(ids: string[]): void {
+    for (const id of ids) {
+      const migration = this.migrationInfo(id);
+      if (migration?.status === 'changed' || migration?.status === 'unverified') throw new DsearchError('COMPATIBILITY_FAILED');
+      this.state.db.prepare('UPDATE scope_migrations SET reindexed=1 WHERE collection_id=?').run(id);
+    }
+  }
+  async previewPatch(id: string, input: unknown) {
+    const patch = CollectionPatch.safeParse(input);if (!patch.success) throw new DsearchError('INVALID_REQUEST');
+    const c = this.requireRegistered(id), policy = JSON.parse(c.scope_json) as ScopePolicy;
+    const request = { name: c.name, root: c.root_path, preset: 'general', include: policy.include, exclude: policy.exclude, path_prefixes: policy.path_prefixes, metadata_filter: policy.metadata_filter, navigation_headings: policy.navigation_headings, ...Object.fromEntries(Object.entries(patch.data).filter(([key]) => !['legacy_compatibility','enabled'].includes(key))) };
+    const recorded = this.state.db.prepare("SELECT previous_scope_json FROM scope_migrations WHERE collection_id=? AND status='changed' AND reviewed=0").get(id);
+    const before = await this.previewScan(request, recorded ? JSON.parse(String(recorded.previous_scope_json)) as ScopePolicy : policy);
+    const next = newScopePolicy(CollectionRequest.parse(request), policy.root_file_key, policy.metadata_mode === 'legacy-v1' && patch.data.legacy_compatibility !== false);
+    const after = await this.previewScan(request, next);
+    // Preview only returns bounded changes when both scans cover the full scope.
+    const { eligible_paths: _paths, ...result } = after;
+    return { ...result, changes: before.partial || after.partial || before.scope_incomplete || after.scope_incomplete ? null : { added: after.eligible_paths.filter(p => !before.eligible_paths.includes(p)).length, removed: before.eligible_paths.filter(p => !after.eligible_paths.includes(p)).length, unchanged: after.eligible_paths.filter(p => before.eligible_paths.includes(p)).length } };
+  }
   async preview(input: unknown) {
+    const { eligible_paths: _paths, ...result } = await this.previewScan(input);return result;
+  }
+  private async previewScan(input: unknown, effectivePolicy?: ScopePolicy) {
     const parsed = CollectionRequest.safeParse(input);if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
     const base = join(this.state.root, 'previews');await mkdir(base, { recursive: true, mode: 0o700 });
+    const info = await lstat(base);if (!info.isDirectory() || info.isSymbolicLink() || await realpath(base) !== base || (info.mode & 0o077)) throw new DsearchError('SCOPE_DENIED');
     const folder = await mkdtemp(join(base, 'scope-'));let store: StateStore | undefined;
     try { store = await StateStore.open(folder);const catalog = new Catalog(store, this.excludedDataRoot), col = await catalog.addCollection(parsed.data);
+      if (effectivePolicy) { const policy = { ...effectivePolicy, root_file_key: JSON.parse(col.scope_json).root_file_key };store.db.prepare("UPDATE collections SET scope_json=?,scope_fp=? WHERE collection_id=?").run(canonicalJSON(policy), digest(canonicalJSON(policy)), col.collection_id); }
       const report = await catalog.reconcile(col.collection_id, { maxEntries: 10000, budget: { maxBytesPerFile: 2 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024, deadline: Date.now() + 5000 } });
-      return { counts: report.counts, partial: !!report.stop_reason, stop_reason: report.stop_reason, scope_incomplete: report.scope_incomplete, read_bytes: report.read_bytes, sample: report.documents.slice(0, 30).map(d => ({ relative_path: d.relative_path, eligibility: d.eligibility, reason: d.eligibility_reason })) };
+      return { eligible_paths: report.documents.filter(d => d.eligibility === "eligible").map(d => d.relative_path), changes: null, counts: report.counts, partial: !!report.stop_reason, stop_reason: report.stop_reason, scope_incomplete: report.scope_incomplete, read_bytes: report.read_bytes, sample: report.documents.slice(0, 30).map(d => ({ relative_path: d.relative_path, eligibility: d.eligibility, reason: d.eligibility_reason })) };
     } finally { store?.close();await rm(folder, { recursive: true, force: true }); }
   }
   documents(collectionId?: string): SourceDocument[] {
@@ -93,8 +124,11 @@ export class Catalog {
   async reconcile(id: string, options: { signal?: AbortSignal; maxEntries?: number; budget?: ScanBudget; captureSources?: boolean } = {}): Promise<ScanReport> {
     if (this.scanning.has(id)) throw new DsearchError("BUSY");this.scanning.add(id);
     try {
-      const collection = this.collection(id);if (!collection.enabled) throw new DsearchError("SCOPE_DENIED");
+      const collection = this.collection(id);if (this.migrationInfo(id)?.status === "changed") throw new DsearchError("COMPATIBILITY_FAILED");if (!collection.enabled) throw new DsearchError("SCOPE_DENIED");
       const policy = JSON.parse(collection.scope_json) as ScopePolicy;await checkRoot(collection.root_path, policy);
+      const migration = !options.budget ? this.state.db.prepare("SELECT previous_scope_json FROM scope_migrations WHERE collection_id=? AND status='unverified' AND reviewed=0").get(id) : undefined;
+      const oldPolicy = migration ? JSON.parse(String(migration.previous_scope_json)) as ScopePolicy : undefined;
+      let comparedEntries = 0, scopeMismatch = false;
       const previous = this.documents(id).filter(d => d.present), observations: Observation[] = [], boundaries: Boundary[] = [];
       const previousByPath = new Map(previous.map(d => [d.relative_path, d]));
       const seen = new Set<string>();let count = 0, readBytes = 0, skipped = 0, stopped = false;
@@ -120,12 +154,14 @@ export class Catalog {
           if (info.isDirectory()) {
             const hidden = child.split("/").some(x => x.startsWith(".") || x === "node_modules");
             const excluded = policy.exclude.some(glob => glob.endsWith("/**") && matchesGlob(child, glob.slice(0, -3)));
-            const product = within(this.excludedDataRoot, full), source = isLegacySourceDirectory(child, policy.preset);
+            const product = within(this.excludedDataRoot, full), source = policy.version !== 2 && isLegacySourceDirectory(child, policy.preset);
             if (hidden || excluded || product || source) boundaries.push({ path: child, eligibility: source ? "excluded_source" : "excluded_pattern", reason: product ? "product_data" : hidden ? "hidden_or_dependency_path" : source ? "source_directory" : "exclude_pattern", incomplete: false });
             else await walk(child, depth + 1);
             continue;
           }
-          let eligibility = pathEligibility(child, policy);if (!info.isFile()) eligibility = { eligibility: "excluded_source", reason: "not_regular_file" };
+          let eligibility = pathEligibility(child, policy);
+          if (oldPolicy && info.isFile()) { comparedEntries++;scopeMismatch ||= (pathEligibility(child, oldPolicy).eligibility === 'eligible') !== (eligibility.eligibility === 'eligible'); }
+          if (!info.isFile()) eligibility = { eligibility: "excluded_source", reason: "not_regular_file" };
           if (eligibility.eligibility !== "eligible") { observations.push({ relative_path: child, file_key: key, ...eligibility });continue; }
           if (options.budget && info.size > BigInt(Math.max(0, Math.min(options.budget.maxBytesPerFile, options.budget.maxTotalBytes - readBytes)))) {
             skipped++;stopReason ??= "byte_limit";const candidate = previousByPath.get(child), old = candidate?.file_key === key ? candidate : undefined;
@@ -136,7 +172,9 @@ export class Catalog {
           try {
             const cap = options.budget ? Math.min(options.budget.maxBytesPerFile, options.budget.maxTotalBytes - readBytes) : 32 * 1024 * 1024;
             const source = await readStableSource(collection.root_path, child, policy, cap, bytes => { readBytes += bytes; });
-            observations.push({ relative_path: child, file_key: source.fileKey, ...metadataEligibility(source.metadata, policy), source });
+            const decision = metadataEligibility(source.metadata, policy);
+            if (oldPolicy) scopeMismatch ||= (metadataEligibility(source.metadata, oldPolicy).eligibility === 'eligible') !== (decision.eligibility === 'eligible');
+            observations.push({ relative_path: child, file_key: source.fileKey, ...decision, source });
           } catch (e) {
             const code = e instanceof DsearchError ? e.code : "INTERNAL_ERROR";
             const eligibility: Eligibility = code === "INVALID_METADATA" ? "invalid_metadata" : code === "UNSUPPORTED_ENCODING" ? "unsupported_encoding" : code === "SOURCE_PENDING" || code === "STALE_REVISION" ? "pending" : "unreadable";
@@ -146,6 +184,12 @@ export class Catalog {
       };
       await walk("", 0);abort();if (stopped) boundaries.push({ path: "", eligibility: "pending", reason: "scan_budget", incomplete: true, retain: true });await checkRoot(collection.root_path, policy);
       if (!this.collection(id).enabled || this.collection(id).scope_fp !== collection.scope_fp) throw new DsearchError("STALE_EPOCH");
+      if (scopeMismatch && oldPolicy) {
+        this.state.transaction(() => {
+          this.state.db.prepare("UPDATE scope_migrations SET status='changed',checked_entries=? WHERE collection_id=?").run(comparedEntries, id);this.state.advance();
+        });
+        throw new DsearchError('COMPATIBILITY_FAILED');
+      }
       const matched = new Set<string>(), byPath = new Map(previous.map(d => [d.relative_path, d])), assigned = new Map<Observation, SourceDocument>();
       for (const observation of observations) {
         const old = byPath.get(observation.relative_path);
@@ -175,6 +219,7 @@ export class Catalog {
       const oldById = new Map(previous.map(d => [d.doc_id, d]));
       const changed = rows.some(row => !oldById.has(row.doc_id) || comparable(oldById.get(row.doc_id)!) !== comparable(row));
       this.state.transaction(() => {
+        if (oldPolicy && !boundaries.some(b => b.incomplete)) this.state.db.prepare("UPDATE scope_migrations SET status='matched',checked_entries=? WHERE collection_id=?").run(comparedEntries, id);
         const seq = changed ? this.state.advance() : this.state.sourceSeq;
         this.state.db.prepare("UPDATE source_documents SET present=0 WHERE collection_id=? AND present=1").run(id);
         const insert = this.state.db.prepare("INSERT INTO source_documents (doc_id,collection_id,relative_path,file_key,present,eligibility,latest_revision_id,observed_seq,observed_at,eligibility_reason) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(doc_id) DO UPDATE SET relative_path=excluded.relative_path,file_key=excluded.file_key,present=excluded.present,eligibility=excluded.eligibility,latest_revision_id=excluded.latest_revision_id,observed_seq=excluded.observed_seq,observed_at=excluded.observed_at,eligibility_reason=excluded.eligibility_reason");
@@ -198,6 +243,7 @@ export class Catalog {
   async readDocument(docId: string, expectedRevision: string): Promise<Source & { document: SourceDocument; collection: Collection }> {
     const doc = this.document(docId), collection = this.collection(doc.collection_id), policy = JSON.parse(collection.scope_json) as ScopePolicy;
     if (within(this.excludedDataRoot, join(collection.root_path, doc.relative_path))) throw new DsearchError("SCOPE_DENIED");
+    if (this.migrationInfo(collection.collection_id)?.status === "changed") throw new DsearchError("COMPATIBILITY_FAILED");
     if (!collection.enabled || !doc.present || doc.eligibility !== "eligible" || pathEligibility(doc.relative_path, policy).eligibility !== "eligible") throw new DsearchError("SCOPE_DENIED");
     if (!doc.latest_revision_id || doc.latest_revision_id !== expectedRevision) throw new DsearchError("STALE_REVISION");
     const source = await readStableSource(collection.root_path, doc.relative_path, policy);

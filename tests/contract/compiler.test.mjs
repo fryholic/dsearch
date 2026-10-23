@@ -4,7 +4,7 @@ import {normalizeSource,compileProbeDocument,sourceIntersection,sourcePoint} fro
 import {mkdtemp,mkdir,writeFile,readFile,readdir,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-test('R0 source map preserves Korean, decomposed text, emoji and CRLF positions without mutating bytes',()=>{
+test('source map preserves Korean, decomposed text, emoji and CRLF positions without mutating bytes',()=>{
  const raw=Buffer.from('\uFEFF# 수학\r\n\r\n한글 e\u0301 😀 정의\r\n\r\n$$\r\nQ=dG\r\n$$\r\n\r\n조건과 위수 설명\r\n');const original=Buffer.from(raw);
  const normalized=normalizeSource(raw);const chunks=compileProbeDocument(normalized.text,'시험');
  assert.deepEqual(raw,original);assert.notEqual(normalized.rawSha256,normalized.textSha256);assert.equal(chunks.length,1);

@@ -1050,3 +1050,7 @@ textarea:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3
 summary::after { content:'⌄'; margin-left:8px; color:var(--fg-secondary); }
 details[open] > summary::after { content:'⌃'; }
 @media(max-width:767px) { .search-workspace .source-panel { margin-top:0; }.results-tools > .search-details { flex-basis:100%; } }
+
+.scope-rules > label { display: grid; gap: 8px; margin-top: 20px; min-width: 0; }
+.scope-rules > .hint { margin: 8px 0 0; }
+.scope-rules > .error-text { margin: 8px 0 0; }

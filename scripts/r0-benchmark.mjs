@@ -11,7 +11,7 @@ import {r0Fingerprint} from './lib/r0-fingerprint.mjs';
 const root=resolve(import.meta.dirname,'..');await mkdir(join(root,'.local/r0'),{recursive:true});await mkdir(join(root,'artifacts/r0'),{recursive:true});
 const folder=await mkdtemp(join(root,'.local/r0/matrix-'));const fixture=await createFixture(folder);
 const base={purpose:'find',collections:['probe'],limit:40,candidate_limit:40,allow_degraded:false};
-const report={schema_version:1,engine_artifact:JSON.parse(await readFile(join(root,'.local/qmd-upstream/dsearch-artifact.json'),'utf8')),reference_artifact:JSON.parse(await readFile(join(root,'.local/qmd-reference/dsearch-artifact.json'),'utf8')),worker_sha256:await fileDigest(join(root,'packages/engine-qmd/dist/worker.js')),scope:'Synthetic R0 tuning comparison; not R1 fixed evaluation',corpus_sha256:fixture.manifest.corpus_sha256,documents:fixture.corpus.documents.length,tuning_queries:20,holdout_executed:false,source_map_checks:fixture.sourceMapChecks,runs:[],environment:{node:process.version,platform:process.platform,arch:process.arch,model_file_cache:'not flushed; model cold start is a new isolated process',swap_before:execFileSync('sysctl',['-n','vm.swapusage'],{encoding:'utf8'}).trim()}};
+const report={schema_version:1,engine_artifact:JSON.parse(await readFile(join(root,'.local/qmd-upstream/dsearch-artifact.json'),'utf8')),reference_artifact:JSON.parse(await readFile(join(root,'.local/qmd-reference/dsearch-artifact.json'),'utf8')),worker_sha256:await fileDigest(join(root,'packages/engine-qmd/dist/worker.js')),scope:'Synthetic development comparison; not representative quality/performance acceptance',corpus_sha256:fixture.manifest.corpus_sha256,documents:fixture.corpus.documents.length,tuning_queries:20,holdout_executed:false,source_map_checks:fixture.sourceMapChecks,runs:[],environment:{node:process.version,platform:process.platform,arch:process.arch,model_file_cache:'not flushed; model cold start is a new isolated process',swap_before:execFileSync('sysctl',['-n','vm.swapusage'],{encoding:'utf8'}).trim()}};
 report.input_fingerprint=await r0Fingerprint();
 function aggregate(rows){return {queries:rows.length,top1_direct:rows.filter(x=>x.metrics.top1Direct).length/rows.length,ndcg10:rows.reduce((s,x)=>s+x.metrics.ndcg10,0)/rows.length,mrr10:rows.reduce((s,x)=>s+x.metrics.mrr10,0)/rows.length,recall40:rows.reduce((s,x)=>s+x.metrics.recall40,0)/rows.length,p50_ms:percentile(rows.map(x=>x.duration_ms),0.5),p95_ms:percentile(rows.map(x=>x.duration_ms),0.95),max_rss_bytes:Math.max(...rows.map(x=>x.rss_bytes))};}
 function mappedRanking(hits,map){const result=[];for(const hit of hits){const source=map[hitName(hit.file)];if(!source)throw new Error('Unmapped engine hit: '+hit.file);if(!result.includes(source.docId))result.push(source.docId);}return result;}
@@ -20,7 +20,7 @@ for(const sourceMode of ['raw','projection'])for(const model of ['reference','em
  const worker=new QmdWorker();const run={source:sourceMode,embedding:model,strict,preflight:[],results:[],summaries:{}};const start=performance.now();
  try{
   await worker.open({engineRoot,dbPath:join(folder,sourceMode+'-'+model+'.sqlite'),collectionPath:join(folder,sourceMode),modelRoot:join(root,'.local/models'),embedRole:model,strict});
-  const probe=await worker.invoke('embedding',{text:'동일한 바이트열과 서명',title:'초기 계측',isQuery:true});run.model_cold_embedding_ms=probe.duration_ms;run.startup_including_integrity_ms=performance.now()-start;run.dimension=probe.result.dimension;
+  const probe=await worker.invoke('embedding',{text:'백업 보관 기간과 복구',title:'초기 계측',isQuery:true});run.model_cold_embedding_ms=probe.duration_ms;run.startup_including_integrity_ms=performance.now()-start;run.dimension=probe.result.dimension;
   await worker.invoke('update');
   if(strict)for(const [name,projection] of Object.entries(fixture.mapping.projection)){
    const inspect=(await worker.invoke('inspect',{text:projection.text,title:projection.title,file:name})).result;if(!inspect.safe)throw new Error('Projection rejected by actual engine: '+name);run.preflight.push({file:name,...inspect});
@@ -50,4 +50,4 @@ for(const sourceMode of ['raw','projection'])for(const model of ['reference','em
 }
 report.environment.swap_after=execFileSync('sysctl',['-n','vm.swapusage'],{encoding:'utf8'}).trim();
 await writeFile(join(root,'artifacts/r0/benchmark.json'),JSON.stringify(report,null,2)+'\n');
-console.log('R0 comparison complete; four source/model combinations, 240 requests.');
+console.log('Engine comparison complete; four source/model combinations, 240 requests.');

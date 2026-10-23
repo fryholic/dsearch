@@ -30,7 +30,7 @@ test('learning preset independently classifies role, status, source and malforme
  const {root,catalog,put}=await fixture(t),prefix='30_Resources/Crypto/';
  for(const [name,front] of [['lesson','role: lesson'],['concept','type: concept'],['old','role: concept\nstatus: superseded'],['role','role: dashboard'],['source','role: source'],['bad','role: concept\nrole: lesson'],['typed','role: [concept]']])await put(prefix+name+'.md','---\n'+front+'\n---\n# '+name+'\n');
  await put(prefix+'Sources/raw.md','# Raw');await put('elsewhere.md','# Outside');
- const collection=await catalog.addCollection({name:'학습',root,preset:'learning',exclude:['**/skip/**']});const report=await catalog.reconcile(collection.collection_id);
+ const collection=await catalog.addCollection({name:'학습',root,exclude:['**/skip/**']});const old={...JSON.parse(collection.scope_json),preset:'learning'};delete old.version;stateForLegacy(catalog,collection.collection_id,old);const report=await catalog.reconcile(collection.collection_id);
  assert.equal(report.counts.eligible,2);assert.equal(report.counts.excluded_status,1);assert.equal(report.counts.excluded_role,1);assert.equal(report.counts.excluded_source,1);assert.equal(report.counts.invalid_metadata,2);assert.equal(report.counts.excluded_pattern,1);assert.ok(report.boundaries.some(b=>b.reason==='source_directory'));
 });
 
@@ -88,7 +88,7 @@ test('cancellation and discovery limits never commit a partial or empty replacem
 
 test('YAML validation rejects duplicate keys, aliases, recursive budgets and incorrect types',()=>{
  assert.deepEqual(parseMetadata('---\ntopics: [ECC, ECDSA]\n---\ntext').metadata,{topics:['ECC','ECDSA']});assert.equal(canonicalJSON({z:1,a:{b:2,a:1}}),'\x7b"a":\x7b"a":1,"b":2\x7d,"z":1\x7d');
- for(const yaml of ['role: lesson\nrole: concept','role: [concept]','topics: text','x: !unknown tag','x: &recursive [*recursive]','- list item'])assert.throws(()=>parseMetadata('---\n'+yaml+'\n---\ntext'),{code:'INVALID_METADATA'});
+ for(const yaml of ['role: lesson\nrole: concept','x: !unknown tag','x: &recursive [*recursive]','- list item'])assert.throws(()=>parseMetadata('---\n'+yaml+'\n---\ntext'),{code:'INVALID_METADATA'});
  assert.throws(()=>parseMetadata('---\nunclosed'),{code:'INVALID_METADATA'});
 });
 
@@ -104,7 +104,7 @@ test('literal byte, deadline and entry budgets preserve unvisited identities and
 
 test('v2 product state migrates scan completeness without altering existing source identity',async t=>{
  const {state,folder,root,catalog,put}=await fixture(t);await put('one.md','# one');const col=await catalog.addCollection({name:'migration',root});await catalog.reconcile(col.collection_id);const id=current(catalog,col.collection_id)[0].doc_id;state.db.exec('DROP TABLE collection_scans; PRAGMA user_version=2;');
- const reopened=await StateStore.open(join(folder,'data'));try{const migrated=new Catalog(reopened);assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version,4);assert.equal(migrated.scanStatus(col.collection_id).status,'unscanned');assert.equal(current(migrated,col.collection_id)[0].doc_id,id);await migrated.reconcile(col.collection_id);assert.equal(migrated.scanStatus(col.collection_id).status,'complete');}finally{reopened.close();}
+ const reopened=await StateStore.open(join(folder,'data'));try{const migrated=new Catalog(reopened);assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version,5);assert.equal(migrated.scanStatus(col.collection_id).status,'unscanned');assert.equal(current(migrated,col.collection_id)[0].doc_id,id);await migrated.reconcile(col.collection_id);assert.equal(migrated.scanStatus(col.collection_id).status,'complete');}finally{reopened.close();}
 });
 
 
@@ -121,3 +121,5 @@ test('legacy scope extraction preserves general and existing learning boundaries
  assert.deepEqual(legacyNavigationHeadings('general'),[]);
  assert.deepEqual(legacyNavigationHeadings('learning'),['목차','학습 탐색','이전·다음']);
 });
+
+function stateForLegacy(catalog,id,policy){ const scope=canonicalJSON(policy);catalog.state.db.prepare('UPDATE collections SET scope_json=? WHERE collection_id=?').run(scope,id); }

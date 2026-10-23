@@ -100,7 +100,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
         const streams = new Set<ServerResponse>(), inflight = new Set<Promise<void>>();
         const collectionInfo = (id: string) => { const c = catalog.collection(id), policy = JSON.parse(c.scope_json), counts: Record<string, number> = {}; for (const doc of catalog.documents(id))
             if (doc.present)
-                counts[doc.eligibility] = (counts[doc.eligibility] ?? 0) + 1; return CollectionInfo.parse({ collection_id: c.collection_id, name: c.name, root_path: c.root_path, enabled: !!c.enabled, preset: policy.preset, include: policy.include, exclude: policy.exclude, scope_fp: c.scope_fp, coverage: counts, scope: catalog.scanStatus(id) }); };
+                counts[doc.eligibility] = (counts[doc.eligibility] ?? 0) + 1; return CollectionInfo.parse({ collection_id: c.collection_id, name: c.name, root_path: c.root_path, enabled: !!c.enabled, preset: "general", policy_version: 2, legacy_compatibility: policy.metadata_mode === "legacy-v1", path_prefixes: policy.path_prefixes ?? [], metadata_filter: policy.metadata_filter ?? null, navigation_headings: policy.navigation_headings ?? [], migration: catalog.migrationInfo(id), include: policy.include, exclude: policy.exclude, scope_fp: c.scope_fp, coverage: counts, scope: catalog.scanStatus(id) }); };
         const jobInfo = (id: string) => managed.info(id);
         const status = () => {
             const profile = profiles.profile, profileFp = profiles.fingerprint;
@@ -110,7 +110,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 for (const doc of JSON.parse(String(generation.coverage_json)))
                     coverage[doc.state] = (coverage[doc.state] ?? 0) + 1;
             const profileState = store.db.prepare('SELECT status FROM profiles WHERE profile_id=?').get(profile.profile_id)?.status ?? 'draft';
-            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, busy: profiles.busy || managed.busy, scope_incomplete: catalog.listCollections().some(c => c.enabled && catalog.scanStatus(c.collection_id).status === 'incomplete'), needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, modes: { lexical: !!generation && generation.profile_fp === profileFp, hybrid: !!generation && generation.profile_fp === profileFp, deep: false, literal: true }, execution: { heavy_concurrency: 1, heavy_busy: lane.busy, queued_requests: lane.queued + sessions.queuedCount, resident_workers: readers.residentWorkers, idle_shutdown_seconds: 300 }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
+            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, busy: profiles.busy || managed.busy, scope_incomplete: catalog.listCollections().some(c => c.enabled && catalog.scanStatus(c.collection_id).status === 'incomplete'), needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, policy_upgrade_pending: catalog.policyUpgradePending, modes: { lexical: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, hybrid: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, deep: false, literal: true }, execution: { heavy_concurrency: 1, heavy_busy: lane.busy, queued_requests: lane.queued + sessions.queuedCount, resident_workers: readers.residentWorkers, idle_shutdown_seconds: 300 }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
         };
         const requireOrigin = (req: IncomingMessage) => { if (req.headers.origin !== origin || (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin'))
             throw new DsearchError('SCOPE_DENIED'); };
@@ -208,6 +208,8 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 json(res, 201, envelope(collectionInfo(collection.collection_id), requestId));
                 return;
             }
+            const scopePreview = /^\/v1\/collections\/([A-Za-z0-9_-]{1,128})\/preview$/.exec(path);
+            if (scopePreview && req.method === 'POST') { json(res, 200, envelope(await catalog.previewPatch(scopePreview[1]!, await body(req)), requestId));return; }
             const collection = /^\/v1\/collections\/([A-Za-z0-9_-]{1,128})$/.exec(path);
             if (collection && req.method === 'PATCH') {
                 const parsed = CollectionPatch.safeParse(await body(req));

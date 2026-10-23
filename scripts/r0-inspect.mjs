@@ -32,7 +32,7 @@ for(const model of registry.models){
   classifier_labels:fields.classifier?.output_labels??null,
   tokenizer:{model:tokenizer.model,pre:tokenizer.pre,vocabulary_size:tokenizer.tokens.length,
    bos:tokenizer.bos_token_id??null,eos:tokenizer.eos_token_id??null,add_bos:tokenizer.add_bos_token??null,add_eos:tokenizer.add_eos_token??null,templates},
-  embedding_input:model.role==='rerank'?null:{query:formatting.formatQueryForEmbedding('same bytes before signing',model.filename),document:formatting.formatDocForEmbedding('동일 바이트열을 사용한다.','합성 표본',model.filename)},
+  embedding_input:model.role==='rerank'?null:{query:formatting.formatQueryForEmbedding('backup retention and recovery',model.filename),document:formatting.formatDocForEmbedding('문서 백업을 보관한다.','검사용 문서',model.filename)},
   output:model.role==='rerank'?'one relevance score per query/document pair':{dimension:fields.embedding_length,norm:'finite nonzero; unit norm is not assumed'}});
 }
 assert.equal(metadata.find(m=>m.role==='embed').embedding_length,1024);
@@ -54,4 +54,4 @@ const report={schema_version:1,input_fingerprint:await r0Fingerprint(),runtime:{
  environment:{machine:observe('sysctl',['-n','hw.model']),cpu:observe('sysctl',['-n','machdep.cpu.brand_string']),physical_memory_bytes:Number(observe('sysctl',['-n','hw.memsize'])),os:observe('sw_vers',['-productVersion']),os_build:observe('sw_vers',['-buildVersion']),memory_pressure:observe('memory_pressure',['-Q']),swap:observe('sysctl',['-n','vm.swapusage']),vm_stat:observe('vm_stat',[])}};
 await mkdir(join(root,'artifacts/r0'),{recursive:true});await writeFile(join(root,'artifacts/r0/model-metadata.json'),JSON.stringify(report,null,2)+'\n');
 for(const profile of profiles)await writeFile(join(root,'artifacts/r0',profile.profile_id+'.json'),JSON.stringify(profile,null,2)+'\n');
-console.log('Verified three GGUF headers and checksums; wrote two resolved R0 candidate profile manifests.');
+console.log('Verified model headers and checksums; wrote resolved profile manifests.');

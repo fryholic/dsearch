@@ -15,13 +15,14 @@ export async function createAlphaProfile(engineRoot: string, embedRole: "embed" 
   const compilerDigest = digest(canonicalJSON({
     production: await fileDigest(fileURLToPath(new URL("../../compiler/dist/production.js", import.meta.url))),
     normalization: await fileDigest(fileURLToPath(new URL("../../compiler/dist/index.js", import.meta.url))),
+    metadata: await fileDigest(fileURLToPath(new URL("../../compiler/dist/metadata.js", import.meta.url))),
     dependency_lock: await fileDigest(fileURLToPath(new URL("../../../pnpm-lock.yaml", import.meta.url))),
-    policy: "projection-v1",
+    policy: "projection-v2",
   }));
   const payload = {
     schema_version: 2, profile_id: "pending-profile", engine: { repository: upstream.repository, source_version: upstream.sourceVersion, upstream_commit: upstream.commit, patch_digest: artifact.patch_digest, artifact_sha256: artifact.artifact_sha256 },
     models: { embed: { ...pick(embedRole), dimension: embedRole === "embed" ? 1024 : 768 }, rerank: pick("rerank"), expansion: null },
-    input_policy: { compiler_version: "projection-v1-" + compilerDigest.slice(0, 16), projection_utf16_cap: 2400, embedding_input_token_cap: 800, query_token_cap: 512, rerank_context_tokens: 4096, strict_no_truncation: true, cache_mode: "memory" },
+    input_policy: { compiler_version: "projection-v2-" + compilerDigest.slice(0, 16), projection_utf16_cap: 2400, embedding_input_token_cap: 800, query_token_cap: 512, rerank_context_tokens: 4096, strict_no_truncation: true, cache_mode: "memory" },
     runtime: { node_exact: process.versions.node, node_llama_cpp: "3.20.0", platform: "darwin-arm64", heavy_concurrency: 1, embed_parallelism: 1, idle_worker_shutdown_seconds: 300 },
   };
   const identity = digest(canonicalJSON(payload));

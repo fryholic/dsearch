@@ -1,2 +1,2 @@
-// P0 client boundary. Command parsing and search polling are implemented in P3.
+// Shared CLI client boundary; command parsing lives in main.ts.
 export { createSearchClient as createCLIClient } from "@dsearch/contracts/client";

@@ -1,3 +1,4 @@
+import { normalizeMetadata } from "./metadata.js";
 import { createHash } from "node:crypto";
 import { setImmediate } from "node:timers/promises";
 import { unified } from "unified";
@@ -18,7 +19,7 @@ export type Passage = {
   reason: string | null; text: string; projection_sha256: string; segments: MapSegment[]; embedding_tokens: number | null;
 };
 export type CoverageBlock = SourceSpan & { type: string; state: "semantic" | "lexical_only" | "excluded_navigation" | "failed"; reason: string | null; passages: string[] };
-export type CompiledDocument = { compiler_version: "projection-v1"; title: string; passages: Passage[]; coverage: CoverageBlock[]; metadata_range: SourceSpan | null };
+export type CompiledDocument = { compiler_version: "projection-v2"; title: string; passages: Passage[]; coverage: CoverageBlock[]; metadata_range: SourceSpan | null };
 const parser = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(remarkFrontmatter, ["yaml"]);
 const span = (node: Node): SourceSpan => ({ start: node.position!.start.offset!, end: node.position!.end.offset! });
 const textOf = (node: Node): string => node.value ?? node.children?.map(textOf).join("") ?? "";
@@ -61,7 +62,7 @@ export async function compileDocument(input: {
   const metadata = input.metadata ?? {}, firstHeading = nodes.find(n => n.type === "heading");
   const title = boundedTitle(typeof metadata.title === "string" ? metadata.title : firstHeading ? textOf(firstHeading) : input.fallback_title);
   const qmdMetadata: Record<string, unknown> = { document_key: input.doc_id };
-  for (const key of ["role", "type", "status", "topics"]) if (metadata[key] !== undefined) qmdMetadata[key] = metadata[key];
+  Object.assign(qmdMetadata, normalizeMetadata(metadata).values);
   const prefix = "---\nqmd:\n  metadata: " + JSON.stringify(qmdMetadata) + "\n---\n# " + title + "\n\n";
   const metadataNode = nodes.find(n => n.type === "yaml"), coverage: CoverageBlock[] = nodes.filter(n => n.type !== "yaml").map(n => ({ ...span(n), type: n.type, state: "failed", reason: "not_compiled", passages: [] }));
   const blocks = new Map(coverage.map(b => [b.start, b]));
@@ -163,7 +164,7 @@ export async function compileDocument(input: {
     let end = block.start;for (const range of spans) { if (range.start > end) throw new Error("SOURCE_MAP_MISMATCH");end = Math.max(end, range.end); }
     if (end !== block.end) throw new Error("SOURCE_MAP_MISMATCH");
   }
-  return { compiler_version: "projection-v1", title, passages, coverage, metadata_range: metadataNode ? span(metadataNode) : null };
+  return { compiler_version: "projection-v2", title, passages, coverage, metadata_range: metadataNode ? span(metadataNode) : null };
 }
 
 export function validateSourceMap(passage: Passage, source: string): void {

@@ -49,7 +49,17 @@ Apple Silicon·메모리 16GB 환경에서 동작을 확인했습니다. 필요�
 
 ## Quick start
 
-프로젝트 소스를 받은 뒤 루트 디렉터리에서 실행합니다.
+프로젝트 소스를 받은 뒤 루트 디렉터리에서 실행합니다. `node --version`으로 위 Node.js 버전을 확인하세요. `pnpm`이 없다면 먼저 Corepack으로 준비합니다.
+
+```sh
+# Corepack이 없는 경우에만 설치
+npm install --global corepack@0.36.0
+corepack enable pnpm
+corepack install
+pnpm --version
+```
+
+`corepack install`은 이 checkout의 `packageManager`에 고정된 pnpm을 준비합니다. 버전 관리자를 사용한다면 선택한 Node.js 환경에서 실행하세요.
 
 ```sh
 # 프로젝트 의존성 설치
@@ -79,7 +89,7 @@ CLI로 시작하려면 다음 [폴더 등록과 색인](#폴더-등록과-색인
 
 ## CLI usage
 
-아래 검색어는 백업·업무 안내 문서를 가정한 예시입니다. 폴더 경로와 검색어는 자신의 문서에 맞게 바꾸세요. `pnpm dsearch` 명령은 프로젝트 루트에서 실행합니다.
+아래 검색어는 [예제 문서](examples/documents)의 백업·업무 안내 내용을 사용합니다. 직접 확인하려면 `collection add "$PWD/examples/documents" --name "Examples"`로 등록하고 색인을 만드세요. 예제는 소규모 기능 확인용이며 검색 품질·성능의 대표 평가 자료는 아닙니다. 폴더 경로와 검색어는 자신의 문서에 맞게 바꾸세요. `pnpm dsearch` 명령은 프로젝트 루트에서 실행합니다.
 
 ### 폴더 등록과 색인
 
@@ -206,7 +216,7 @@ pnpm dsearch serve stop --data-root .local/dev-data
 
 ### 컬렉션과 검색 범위
 
-기본 `general` 프리셋은 `.md`와 `.markdown` 파일을 대상으로 하며 정해진 폴더 구조나 학습용 메타데이터를 요구하지 않습니다. 숨김 폴더·`node_modules`·symlink·제품 데이터 폴더는 기본적으로 제외합니다.
+새 컬렉션은 `general` 설정으로 `.md`와 `.markdown` 파일을 대상으로 하며 폴더 구조나 메타데이터를 요구하지 않습니다. `Sources` 같은 폴더명이나 `superseded` 같은 상태 값에 따른 자동 제외도 없습니다. 숨김 폴더·`node_modules`·symlink·제품 데이터 폴더는 기본적으로 제외합니다.
 
 `--include`와 `--exclude`로 범위를 조정할 수 있습니다. glob 패턴은 등록할 폴더를 기준으로 해석하며, 셸에서 확장되지 않도록 따옴표로 감쌉니다.
 
@@ -221,6 +231,45 @@ pnpm dsearch collection preview /absolute/path/to/documents \
 미리보기는 컬렉션을 등록하지 않습니다. 확인한 범위는 같은 옵션의 `collection add`로 등록합니다. 기존 규칙은 `collection update COLLECTION_ID`로 변경할 수 있습니다.
 
 `--include`를 지정하면 기본 포함 패턴을 대체합니다. 포함 패턴 중 하나에 일치하면 포함 후보가 되고, 제외 패턴에 일치하면 제외합니다. 컬렉션을 일시적으로 검색에서 빼려면 `collection disable COLLECTION_ID`, 복귀시키려면 `collection enable COLLECTION_ID`를 사용합니다.
+
+하위 폴더·메타데이터·제목에 따른 제한이 필요하면 GUI의 **포함·제외 규칙** 또는 `--scope-json`을 사용합니다. 경로 접두사는 glob이 아닌 상대 폴더 경로이며 `/`로 끝나야 합니다. 비워 두면 해당 제한이 없습니다.
+
+```sh
+pnpm dsearch collection preview /absolute/path/to/documents \
+  --name "Project documents" \
+  --scope-json '{"path_prefixes":["Projects/"],"metadata_filter":{"not":{"field":"metadata.status","operator":"eq","value":"draft"}},"navigation_headings":["Navigation"]}' \
+  --json
+
+# 기존 컬렉션의 변경 전후 문서 수를 확인한 뒤 같은 규칙을 저장
+pnpm dsearch collection preview COLLECTION_ID \
+  --scope-json '{"metadata_filter":null}' --json
+pnpm dsearch collection update COLLECTION_ID \
+  --scope-json '{"metadata_filter":null}' --json
+pnpm dsearch reconcile
+```
+
+`--scope-json`에 지정하지 않은 필드는 기존 규칙을 유지합니다. 기존 컬렉션의 미리보기는 새로 포함·제외되는 문서 수와 유지되는 수를 반환하며, 읽기·시간 한도에 걸리거나 접근하지 못한 범위가 있으면 차이 집계를 확정하지 않습니다. GUI는 변경한 규칙으로 다시 미리보기를 마친 뒤 저장할 수 있습니다. `navigation_headings`는 정확히 일치하는 제목 아래 본문 구간을 색인에서 제외하며 원문은 유지합니다.
+
+### 메타데이터와 필터
+
+YAML frontmatter의 `role`과 `type`은 독립적인 필드입니다. 문자열·숫자·불리언과 같은 형식의 단일 값 또는 목록을 필터에 사용할 수 있으며, 중첩 객체는 `metadata.project.team`처럼 지정합니다. GUI에서 유형·역할을 각각 선택하거나 CLI의 `--filter-json`, MCP의 `filter`를 사용할 수 있습니다.
+
+```sh
+pnpm dsearch search "운영" --mode lexical \
+  --filter-json '{"field":"metadata.type","operator":"eq","value":"guide"}' --json
+```
+
+`eq`는 값 또는 목록의 원소가 일치하는지, `in`은 후보 목록 중 하나가 일치하는지, `all`은 후보가 모두 들어 있는지 확인합니다. `ne`는 해당 형식의 값이 존재하면서 일치하지 않을 때만 참입니다. 누락된 필드까지 포함해 특정 값을 제외하려면 `not`으로 `eq`를 감쌉니다. `exists`와 `and`·`or`·`not`도 지원합니다.
+
+검색용 필드는 최대 63개이며 값은 문자열 1,024자·목록 128개·중첩 깊이 6단계까지 정규화합니다. 필드명은 영문 소문자로 시작하는 영문 소문자·숫자·`_`·`.`·`-`의 조합으로 최대 64자입니다. 지원하지 않는 값은 원래 메타데이터에 보관하고 필터에서 생략하며 처리 상태에 알립니다. YAML 문법 오류·중복 키·파싱 한도 초과는 문서 처리 오류로 표시합니다. 필터는 원문 파일을 변경하지 않습니다.
+
+### 기존 컬렉션 업그레이드
+
+이전 버전의 서비스를 `serve stop`으로 종료하고 새 코드를 빌드한 뒤 다시 시작하세요. 최초 실행 시 카탈로그를 SQLite의 일관된 백업으로 데이터 디렉터리의 `backups/`에 저장하고, 기존 포함 범위를 명시적인 규칙으로 변환합니다. 컬렉션·문서 ID와 원문은 유지합니다.
+
+기존 메타데이터 형식 제약은 호환 모드로 유지합니다. 새 색인을 만드는 동안 이전·이후 포함 판정을 대조하며, 일치하지 않으면 게시를 중단합니다. GUI의 **범위 편집과 처리 상태**에서 변환된 규칙을 확인하고 수동 색인을 실행하세요. 새 색인이 게시될 때까지 이전 정책의 색인을 검색에 사용하지 않습니다. 프로필 후보 준비만으로는 전환되지 않습니다.
+
+이전 형식 제약을 해제하려면 GUI의 체크박스 또는 기존 `collection preview`·`collection update`의 `--no-legacy-metadata` 옵션을 사용합니다. 먼저 미리보기로 추가되는 문서를 확인하세요. 경로·상태 등의 명시적 범위 규칙은 별도로 편집합니다. 새 색인은 변경된 메타데이터 처리 방식으로 작성하며 이전 색인 파일은 삭제하지 않습니다. 자동 복원 명령은 제공하지 않으므로 백업 파일도 유지하세요.
 
 ### 모델과 검색 기본값
 
@@ -268,6 +317,7 @@ apps/       로컬 서비스, CLI, 웹 GUI, MCP 서버
 packages/   문서 관리, 검색 엔진 연결, 공통 UI와 요청·응답 정의
 scripts/    준비·빌드·검사 도구
 tests/      자동 검사
+examples/   직접 등록해 사용할 수 있는 일반 문서 예제
 fixtures/   합성 검사 자료
 vendor/     엔진·모델 명세, 호환 패치, 라이선스 고지
 ```

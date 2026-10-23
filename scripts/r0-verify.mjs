@@ -6,13 +6,13 @@ import {r0Fingerprint} from './lib/r0-fingerprint.mjs';
 const root=resolve(import.meta.dirname,'..'),folder=join(root,'artifacts/r0');
 await mkdir(folder,{recursive:true});
 const start=new Date().toISOString(),fingerprint=await r0Fingerprint();
-const report={schema_version:1,status:'running',checkpoint:'P0-P1 / R0',started_at:start,input_fingerprint:fingerprint,steps:[]};
+const report={schema_version:1,status:'running',checkpoint:'Engine compatibility verification',started_at:start,input_fingerprint:fingerprint,steps:[]};
 const save=()=>writeFile(join(folder,'verification.json'),JSON.stringify(report,null,2)+'\n');
 const json=async name=>JSON.parse(await readFile(join(folder,name),'utf8'));
 await save();
 try{
  for(const command of ['check','r0:inspect','test:r0','r0:benchmark']){
-  console.log('R0 verification: '+command);
+  console.log('Engine verification: '+command);
   const result=spawnSync('pnpm',[command],{cwd:root,stdio:'inherit'});
   report.steps.push({command,exit_code:result.status});await save();
   if(result.error||result.status!==0)throw new Error('Verification command failed: '+command);
@@ -38,6 +38,6 @@ try{
  const upstream=JSON.parse(await readFile(join(root,'vendor/qmd-upstream.json'),'utf8'));
  assert.equal(benchmark.engine_artifact.artifact_sha256,upstream.engineArtifactSha256);assert.equal(benchmark.engine_artifact.patch_digest,upstream.patchSha256);
  report.status='passed';report.completed_at=new Date().toISOString();report.native_checks=checked.size;report.comparison_requests=requests;
- report.scope='Engineering compatibility on synthetic development fixtures. R1 fixed evaluation, installation, production catalog and product UI are subsequent checkpoints.';
- await save();console.log('First checkpoint passed: P0/P1 compatibility evidence is complete and matches the current source fingerprint.');
+ report.scope='Engineering compatibility on synthetic development fixtures. Representative quality, installation and endurance acceptance are separate.';
+ await save();console.log('Engine compatibility verification passed for the current source fingerprint.');
 }catch(error){report.status='failed';report.completed_at=new Date().toISOString();report.failure=error.message;await save();throw error;}

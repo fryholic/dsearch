@@ -12,7 +12,7 @@ function run(cmd,args,cwd=root,options={}) {
  if(r.error||r.status!==0)throw new Error(cmd+' failed: '+(r.stderr||r.error?.message||r.status));
  return r.stdout;
 }
-if(process.platform!=='darwin'||process.arch!=='arm64')throw new Error('R0 target is darwin-arm64');
+if(process.platform!=='darwin'||process.arch!=='arm64')throw new Error('Supported platform is macOS Apple Silicon (darwin-arm64)');
 await mkdir(join(root,'.local'),{recursive:true});
 if(!await access(join(engine,'.git')).then(()=>true,()=>false)) {
  run('git',['clone','--filter=blob:none','--no-checkout',source.repository+'.git',engine]);

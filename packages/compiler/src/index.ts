@@ -1,3 +1,4 @@
+export { normalizeMetadata, type SearchMetadata } from "./metadata.js";
 import { createHash } from "node:crypto";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
@@ -19,7 +20,7 @@ export function normalizeSource(bytes: Uint8Array): { text: string; rawSha256: s
   const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
   return { text, rawSha256: hash(bytes), textSha256: hash(text) };
 }
-/** R0 compiler prototype. Scope/identity/coverage persistence is implemented in P2. */
+/** Source-boundary compatibility compiler. Production indexing uses compileDocument. */
 export function compileProbeDocument(text: string, title: string): ProbeProjection[] {
   const children = (parser.parse(text) as Node).children ?? [];
   const projections: ProbeProjection[] = [];

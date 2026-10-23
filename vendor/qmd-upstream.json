@@ -3,7 +3,7 @@
   "sourceVersion": "2.8.3",
   "commit": "86d2365d17fc682e491c2c53d1e4a884aee8682a",
   "license": "MIT",
-  "integrationStatus": "r0-implemented",
+  "integrationStatus": "implemented",
   "requiredCompatibilityPatches": [
     "EP-01",
     "EP-02",

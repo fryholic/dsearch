@@ -15,7 +15,7 @@ export type BuildHandle = { job_id: string; generation_id: string; completion: P
 type ActiveBuild = { controller: AbortController; handle: BuildHandle };
 const timestamp = () => new Date().toISOString();
 
-/** Manual full-generation builder. Incremental reuse and restart recovery follow in P6. */
+/** Manual full-generation builder with validation before publication. */
 export class GenerationBuilder {
   private active: ActiveBuild | undefined;
   private closing = false;
@@ -95,7 +95,7 @@ export class GenerationBuilder {
         const source = await this.catalog.readDocument(doc.doc_id, doc.latest_revision_id), collection = collections.find(c => c.collection_id === doc.collection_id)!;
         let compiled: CompiledDocument;
         try {
-          compiled = await compileDocument({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, text: source.text, metadata: source.metadata, fallback_title: basename(doc.relative_path, extname(doc.relative_path)), navigation_headings: legacyNavigationHeadings(JSON.parse(collection.scope_json).preset), signal }, async (text, title, file) => (await builder.invoke<EngineResponse<{ embeddingTokens: number; embeddingChunks: number; searchChunks: number; safe: boolean }>>("inspect", { text, title, file }, { signal })).result);
+          compiled = await compileDocument({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, text: source.text, metadata: source.metadata, fallback_title: basename(doc.relative_path, extname(doc.relative_path)), navigation_headings: (JSON.parse(collection.scope_json).navigation_headings ?? legacyNavigationHeadings(JSON.parse(collection.scope_json).preset)), signal }, async (text, title, file) => (await builder.invoke<EngineResponse<{ embeddingTokens: number; embeddingChunks: number; searchChunks: number; safe: boolean }>>("inspect", { text, title, file }, { signal })).result);
         } catch (e) {
           if (!e || typeof e !== "object" || !("code" in e) || e.code !== "PARSE_ERROR") throw e;
           coverage.push({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, collection_id: doc.collection_id, state: "failed", reason: "parse_error", coverage: [{ start: source.bodyStart, end: source.text.length, type: "document", state: "failed", reason: "parse_error", passages: [] }] });completed++;continue;
@@ -159,6 +159,7 @@ export class GenerationBuilder {
         state.db.prepare("UPDATE generations SET state='ready' WHERE generation_id=?").run(genId);
         state.db.prepare("INSERT INTO active_slot VALUES (1,?,?,?) ON CONFLICT(slot) DO UPDATE SET generation_id=excluded.generation_id,epoch=excluded.epoch,changed_at=excluded.changed_at").run(genId, epoch, timestamp());
         state.db.prepare("UPDATE generations SET state='active' WHERE generation_id=?").run(genId);
+        this.catalog.markPoliciesIndexed(collections.map(c => c.collection_id));
         state.db.prepare("UPDATE jobs SET state='succeeded',phase='complete',progress_json=?,updated_at=? WHERE job_id=?").run(canonicalJSON({ documents: docs.length, passages: mappings.length }), timestamp(), jobId);
       });
       return { generation_id: genId, epoch, manifest_sha256: sealed.sha256, coverage, published: true };

@@ -9,7 +9,7 @@ test('manual generation publishes only fully verified sources and preserves the 
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/builder-')),source=join(folder,'source');await mkdir(source);
  await writeFile(join(source,'one.md'),'---\nrole: concept\n---\n# Canonical encoding\n\n같은 바이트열을 서명한다. Canonical encoding fixes signing input bytes.');
  await writeFile(join(source,'two.md'),'# Code\n\n설명\n\n```text\n'+('x'.repeat(2700))+'\n```\n\n조건');
- await writeFile(join(source,'bad.md'),'---\nrole: [bad]\n---\n# Invalid metadata');
+ await writeFile(join(source,'bad.md'),'---\nrole: bad\nrole: duplicate\n---\n# Invalid metadata');
  const state=await StateStore.open(join(folder,'data')),catalog=new Catalog(state),col=await catalog.addCollection({name:'manual',root:source}),profile=await createAlphaProfile(engineRoot);
  const options={engineRoot,modelRoot,profile:profile.manifest,embedRole:'embed'};
  try{

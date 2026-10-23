@@ -5,7 +5,7 @@
   "tuning_count": 20,
   "holdout": {
     "required_count": 40,
-    "status": "reserved-for-r1",
+    "status": "not-executed",
     "executed": false
   },
   "split_policy": {
@@ -17,5 +17,5 @@
     ],
     "holdout_used_for_tuning": false
   },
-  "judgment": "Author-labeled synthetic development fixture; not a measurement of the private vault or R1 fixed evaluation."
+  "judgment": "Author-labeled synthetic development fixture focused on technical documents; not representative quality or performance evidence."
 }

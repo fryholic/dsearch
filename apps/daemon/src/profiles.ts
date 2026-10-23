@@ -73,7 +73,7 @@ export class ProfileController {
       const worker = new QmdWorker();try { await worker.open({ ...engine, role: 'reader' }); } finally { await worker.close(); }
       for (const doc of state.db.prepare("SELECT doc_id,revision_id FROM generation_documents WHERE generation_id=? AND processing_state IN ('included','partial','lexical_only')").all(generationId)) { check();await this.catalog.readDocument(String(doc.doc_id), String(doc.revision_id)); }
       await verifySeal(root, String(row.manifest_sha256));check();progress('publishing');
-      state.transaction(() => { check();state.db.prepare("UPDATE generations SET state='retired' WHERE state='active'").run();state.db.prepare("UPDATE generations SET state='active' WHERE generation_id=?").run(generationId);state.db.prepare("INSERT INTO active_slot VALUES (1,?,?,?) ON CONFLICT(slot) DO UPDATE SET generation_id=excluded.generation_id,epoch=excluded.epoch,changed_at=excluded.changed_at").run(generationId, expectedEpoch + 1, new Date().toISOString()); });
+      state.transaction(() => { check();this.catalog.markPoliciesIndexed(scopes.map(c => c.collection_id));state.db.prepare("UPDATE generations SET state='retired' WHERE state='active'").run();state.db.prepare("UPDATE generations SET state='active' WHERE generation_id=?").run(generationId);state.db.prepare("INSERT INTO active_slot VALUES (1,?,?,?) ON CONFLICT(slot) DO UPDATE SET generation_id=excluded.generation_id,epoch=excluded.epoch,changed_at=excluded.changed_at").run(generationId, expectedEpoch + 1, new Date().toISOString()); });
       this.selected = target;this.currentBuilder = this.makeBuilder(target);this.options.readers.sweep();
     });
   }
