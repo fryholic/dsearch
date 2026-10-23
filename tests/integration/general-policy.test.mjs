@@ -119,3 +119,18 @@ test('explicit registration after removing a migrated collection replaces its ru
  assert.equal(JSON.parse(restored.scope_json).metadata_mode,'general');
  const scan=await catalog.reconcile(id);assert.equal(scan.counts.eligible,6);
 });
+
+
+test('conversion audit visits directories excluded only by the converted policy',async t=>{
+ const {f,id,before}=await legacyFixture(t),catalog=await f.reopen();
+ const policy=JSON.parse(catalog.collection(id).scope_json);policy.exclude.push('30_Resources/Crypto/**');const changed=canonicalJSON(policy);
+ f.state.db.prepare('UPDATE collections SET scope_json=?,scope_fp=? WHERE collection_id=?').run(changed,digest(changed),id);
+ await assert.rejects(catalog.reconcile(id),{code:'COMPATIBILITY_FAILED'});assert.equal(catalog.migrationInfo(id).status,'changed');assert.deepEqual(catalog.documents(id).map(d=>d.doc_id),before.map(d=>d.id));
+});
+
+test('bounded literal scans also reject a policy mismatch without accepting newly included sources',async t=>{
+ const {f,id,before}=await legacyFixture(t),catalog=await f.reopen();
+ const policy=JSON.parse(catalog.collection(id).scope_json);policy.path_prefixes=[];const changed=canonicalJSON(policy);
+ f.state.db.prepare('UPDATE collections SET scope_json=?,scope_fp=? WHERE collection_id=?').run(changed,digest(changed),id);
+ await assert.rejects(catalog.reconcile(id,{budget:{maxBytesPerFile:1048576,maxTotalBytes:10485760,deadline:Date.now()+5000}}),{code:'COMPATIBILITY_FAILED'});assert.equal(catalog.migrationInfo(id).status,'changed');assert.deepEqual(catalog.documents(id).map(d=>d.doc_id),before.map(d=>d.id));
+});

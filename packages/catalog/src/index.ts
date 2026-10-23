@@ -126,7 +126,7 @@ export class Catalog {
     try {
       const collection = this.collection(id);if (this.migrationInfo(id)?.status === "changed") throw new DsearchError("COMPATIBILITY_FAILED");if (!collection.enabled) throw new DsearchError("SCOPE_DENIED");
       const policy = JSON.parse(collection.scope_json) as ScopePolicy;await checkRoot(collection.root_path, policy);
-      const migration = !options.budget ? this.state.db.prepare("SELECT previous_scope_json FROM scope_migrations WHERE collection_id=? AND status='unverified' AND reviewed=0").get(id) : undefined;
+      const migration = this.state.db.prepare("SELECT previous_scope_json FROM scope_migrations WHERE collection_id=? AND status='unverified' AND reviewed=0").get(id);
       const oldPolicy = migration ? JSON.parse(String(migration.previous_scope_json)) as ScopePolicy : undefined;
       let comparedEntries = 0, scopeMismatch = false;
       const previous = this.documents(id).filter(d => d.present), observations: Observation[] = [], boundaries: Boundary[] = [];
@@ -155,7 +155,9 @@ export class Catalog {
             const hidden = child.split("/").some(x => x.startsWith(".") || x === "node_modules");
             const excluded = policy.exclude.some(glob => glob.endsWith("/**") && matchesGlob(child, glob.slice(0, -3)));
             const product = within(this.excludedDataRoot, full), source = policy.version !== 2 && isLegacySourceDirectory(child, policy.preset);
-            if (hidden || excluded || product || source) boundaries.push({ path: child, eligibility: source ? "excluded_source" : "excluded_pattern", reason: product ? "product_data" : hidden ? "hidden_or_dependency_path" : source ? "source_directory" : "exclude_pattern", incomplete: false });
+            const oldExcluded = oldPolicy && (oldPolicy.exclude.some(glob => glob.endsWith("/**") && matchesGlob(child, glob.slice(0, -3))) || (oldPolicy.version !== 2 && isLegacySourceDirectory(child, oldPolicy.preset)));
+            // During conversion, inspect either policy's candidate directories before comparing file decisions.
+            if (hidden || product || ((excluded || source) && (!oldPolicy || oldExcluded))) boundaries.push({ path: child, eligibility: source ? "excluded_source" : "excluded_pattern", reason: product ? "product_data" : hidden ? "hidden_or_dependency_path" : source ? "source_directory" : "exclude_pattern", incomplete: false });
             else await walk(child, depth + 1);
             continue;
           }
@@ -219,7 +221,7 @@ export class Catalog {
       const oldById = new Map(previous.map(d => [d.doc_id, d]));
       const changed = rows.some(row => !oldById.has(row.doc_id) || comparable(oldById.get(row.doc_id)!) !== comparable(row));
       this.state.transaction(() => {
-        if (oldPolicy && !boundaries.some(b => b.incomplete)) this.state.db.prepare("UPDATE scope_migrations SET status='matched',checked_entries=? WHERE collection_id=?").run(comparedEntries, id);
+        if (oldPolicy && !options.budget && !boundaries.some(b => b.incomplete)) this.state.db.prepare("UPDATE scope_migrations SET status='matched',checked_entries=? WHERE collection_id=?").run(comparedEntries, id);
         const seq = changed ? this.state.advance() : this.state.sourceSeq;
         this.state.db.prepare("UPDATE source_documents SET present=0 WHERE collection_id=? AND present=1").run(id);
         const insert = this.state.db.prepare("INSERT INTO source_documents (doc_id,collection_id,relative_path,file_key,present,eligibility,latest_revision_id,observed_seq,observed_at,eligibility_reason) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(doc_id) DO UPDATE SET relative_path=excluded.relative_path,file_key=excluded.file_key,present=excluded.present,eligibility=excluded.eligibility,latest_revision_id=excluded.latest_revision_id,observed_seq=excluded.observed_seq,observed_at=excluded.observed_at,eligibility_reason=excluded.eligibility_reason");
