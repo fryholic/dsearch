@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Catalog, canonicalJSON, digest } from '@dsearch/catalog';
 import { DsearchError, ProfileManifest } from '@dsearch/contracts';
-import { verifySeal, type IndexedPassage } from '@dsearch/generations';
+import { verifySeal, pinGeneration, type IndexedPassage } from '@dsearch/generations';
 import { QmdWorker, type OpenEngine, type EngineResponse } from '@dsearch/engine-qmd';
 import type { Progress } from '@dsearch/runtime';
 export type Snapshot = {
@@ -20,6 +20,7 @@ export type Reader = {
 };
 type Entry = {
     snapshot: Snapshot;
+    unpin: () => void;
     ready?: Promise<Reader>;
     lastUsed: number;
     refs: number;
@@ -67,7 +68,7 @@ export class ReaderPool {
         this.sweep();
         let entry = this.entries.get(snapshot.generation_id);
         if (!entry || entry.worker?.process.state === 'stopped') {
-            entry = { snapshot, refs: 0, tail: Promise.resolve(), retired: false, lastUsed: Date.now() };
+            entry = { snapshot, unpin: pinGeneration(this.catalog.state,snapshot.generation_id,"reader"), refs: 0, tail: Promise.resolve(), retired: false, lastUsed: Date.now() };
             this.entries.set(snapshot.generation_id, entry);
         }
         entry.refs++;
@@ -167,8 +168,8 @@ export class ReaderPool {
             this.entries.delete(entry.snapshot.generation_id);
         const closing = (entry.ready ?? Promise.reject()).then(reader => reader.worker.close(), () => { }).catch(() => { });
         this.closings.add(closing);
-        void closing.finally(() => this.closings.delete(closing));
+        void closing.finally(() => { this.closings.delete(closing);entry.unpin(); });
     }
     async close(): Promise<void> { this.closing = true; clearInterval(this.idleTimer); const entries = [...this.entries.values()]; this.entries.clear(); await Promise.allSettled(entries.map(e => e.ready?.then(r => r.worker.close(), () => { }))); while (this.closings.size)
-        await Promise.allSettled([...this.closings]); }
+        await Promise.allSettled([...this.closings]);for(const entry of entries)entry.unpin(); }
 }

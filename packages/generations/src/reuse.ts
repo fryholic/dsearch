@@ -4,21 +4,24 @@ import { Catalog } from '@dsearch/catalog';
 import { DsearchError } from '@dsearch/contracts';
 import { QmdWorker, type OpenEngine } from '@dsearch/engine-qmd';
 import { verifySeal } from './seal.js';
+import { pinGeneration } from './pins.js';
 import type { GenerationDocument, IndexedPassage } from './builder.js';
 
 export type SourceInput = { doc_id: string; revision_id: string; relative_path: string; scope_fp: string };
-export type ReuseSnapshot = { directory: string; coverage: GenerationDocument[]; mappings: IndexedPassage[]; inputs: SourceInput[] };
+export type ReuseSnapshot = { directory: string; coverage: GenerationDocument[]; mappings: IndexedPassage[]; inputs: SourceInput[]; release: () => void };
 
 /** Clone through the pinned SDK only; the old database remains a sealed reader. */
 export async function snapshotForReuse(catalog: Catalog, fp: string, engine: OpenEngine, signal: AbortSignal): Promise<ReuseSnapshot | undefined> {
   const row = catalog.state.db.prepare("SELECT g.directory_path,g.manifest_sha256,g.profile_fp,p.status FROM active_slot a JOIN generations g ON g.generation_id=a.generation_id JOIN profiles p ON p.profile_id=g.profile_id WHERE a.slot=1 AND g.state='active'").get();
   if (!row || row.profile_fp !== fp || row.status !== 'validated') return;
+  const release=pinGeneration(catalog.state,String(catalog.state.db.prepare("SELECT generation_id FROM active_slot WHERE slot=1").get()!.generation_id),"builder-base");
+  try {
   const directory = String(row.directory_path), sha = String(row.manifest_sha256);
   const manifest = await verifySeal(directory, sha);
   if (manifest.profile_fp !== fp) throw new DsearchError('COMPATIBILITY_FAILED');
   const previous = JSON.parse(await readFile(join(directory,'engine-config.json'),'utf8')) as OpenEngine;
   const keys = (value: OpenEngine) => Object.keys(value.collections ?? {}).sort().join('\0');
-  if (previous.engineRoot !== engine.engineRoot || previous.modelRoot !== engine.modelRoot || previous.embedRole !== engine.embedRole || keys(previous) !== keys(engine)) return;
+  if (previous.engineRoot !== engine.engineRoot || previous.modelRoot !== engine.modelRoot || previous.embedRole !== engine.embedRole || keys(previous) !== keys(engine)) { release();return; }
   const inputsFile = manifest.files.some(file=>file.path==='source-inputs.json');
   const saved = inputsFile ? JSON.parse(await readFile(join(directory,'source-inputs.json'),'utf8')) : { schema_version:1, inputs:[] };
   if (saved.schema_version !== 1 || !Array.isArray(saved.inputs) || saved.inputs.some((input: SourceInput)=>!input || ['doc_id','revision_id','relative_path','scope_fp'].some(key=>typeof input[key as keyof SourceInput]!=='string'))) throw new DsearchError('COMPATIBILITY_FAILED');
@@ -32,5 +35,6 @@ export async function snapshotForReuse(catalog: Catalog, fp: string, engine: Ope
     await reader.invoke('snapshot',{target:engine.dbPath},{signal});
   } finally { await reader.close(); }
   await verifySeal(directory,sha);
-  return {directory,coverage,mappings,inputs:saved.inputs};
+  return {directory,coverage,mappings,inputs:saved.inputs,release};
+  }catch(error){release();throw error;}
 }

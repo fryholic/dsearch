@@ -1,6 +1,6 @@
 import { HeavyLane } from "@dsearch/runtime";
 import { randomUUID } from "node:crypto";
-import { mkdir, chmod, readFile } from "node:fs/promises";
+import { mkdir, chmod, readFile, rm } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
 import { Catalog, canonicalJSON, digest, legacyNavigationHeadings } from "@dsearch/catalog";
 import { compileDocument, type Passage, type CoverageBlock, type CompiledDocument } from "@dsearch/compiler";
@@ -9,6 +9,8 @@ import { JobInfo } from "@dsearch/contracts/control";
 import { QmdWorker, type EngineResponse, type OpenEngine } from "@dsearch/engine-qmd";
 import { atomicFile, sealFiles, verifySeal } from "./seal.js";
 import { snapshotForReuse, type SourceInput } from './reuse.js';
+import { pinGeneration, maintenanceActive } from './pins.js';
+import { BuildCheckpoints, loadCheckpoint, type BuildPlan, type CheckpointCursor } from './checkpoint.js';
 export type GenerationDocument = { doc_id: string; revision_id: string | null; collection_id: string; state: "included" | "partial" | "lexical_only" | "excluded" | "pending" | "failed"; reason: string | null; coverage: CoverageBlock[] };
 export type IndexedPassage = Omit<Passage, "text"> & { engine_collection: string; engine_relative_path: string };
 export type BuildResult = { generation_id: string; epoch: number; manifest_sha256: string; coverage: GenerationDocument[]; published: boolean };
@@ -23,39 +25,58 @@ export class GenerationBuilder {
   constructor(readonly catalog: Catalog, readonly options: { engineRoot: string; modelRoot: string; profile: ProfileManifest; embedRole: "embed" | "reference"; lane?: HeavyLane; beforeWork?: (signal: AbortSignal) => Promise<void>; fault?: (phase: string) => void | Promise<void> }) {}
   get busy(): boolean { return this.active !== undefined; }
   getJob(id: string) {
-    const row = this.catalog.state.db.prepare("SELECT job_id,kind,generation_id,state,phase,progress_json,cancel_requested,error_code,updated_at FROM jobs WHERE job_id=?").get(id);
+    const row = this.catalog.state.db.prepare("SELECT job_id,kind,generation_id,state,phase,cursor_json,progress_json,cancel_requested,error_code,updated_at FROM jobs WHERE job_id=?").get(id);
     if (!row) throw new DsearchError("NOT_FOUND");
-    return JobInfo.parse({ job_id: row.job_id, kind: row.kind, generation_id: row.generation_id, state: row.cancel_requested && ["queued", "running"].includes(String(row.state)) ? "cancel_requested" : row.state, phase: row.phase, progress: JSON.parse(String(row.progress_json)), error_code: row.error_code, updated_at: row.updated_at });
+    return JobInfo.parse({ job_id: row.job_id, kind: row.kind, generation_id: row.generation_id, state: row.cancel_requested && ["queued", "running"].includes(String(row.state)) ? "cancel_requested" : row.state, phase: row.phase, progress: JSON.parse(String(row.progress_json)), error_code: row.error_code, retryable: ["failed","obsolete","cancelled"].includes(String(row.state)) && !!JSON.parse(String(row.cursor_json)).checkpoint, updated_at: row.updated_at });
   }
   cancel(id: string): void {
     this.getJob(id);
     if (this.active?.handle.job_id !== id) return;
     this.catalog.state.db.prepare("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE job_id=?").run(timestamp(), id);this.active.controller.abort();
   }
-  start(options: { publish?: boolean; full?: boolean } = {}): BuildHandle {
+  start(options: { publish?: boolean; full?: boolean; resume?: string } = {}): BuildHandle {
     if (this.closing) throw new DsearchError("SERVICE_UNAVAILABLE");
-    if (this.active) throw new DsearchError("BUSY");
+    if (this.active || maintenanceActive(this.catalog.state)) throw new DsearchError("BUSY");
     const state = this.catalog.state, profile = this.options.profile, fp = digest(canonicalJSON(profile)), jobId = randomUUID(), genId = randomUUID();
-    const directory = join(state.root, "generations", genId), created = timestamp();
+    let targetGenId: string = genId, resumeCursor: CheckpointCursor | undefined;
+    const prior = options.resume ? state.db.prepare("SELECT j.*,g.profile_fp,g.directory_path,g.state AS generation_state FROM jobs j JOIN generations g USING(generation_id) WHERE j.job_id=?").get(options.resume) : undefined;
+    if (options.resume) {
+      if (!prior) throw new DsearchError("NOT_FOUND");
+      if (!['failed','cancelled','obsolete'].includes(String(prior.state)) || prior.generation_state !== 'invalid' || prior.profile_fp !== fp) throw new DsearchError("COMPATIBILITY_FAILED");
+      const latest = state.db.prepare('SELECT job_id FROM jobs WHERE generation_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(String(prior.generation_id));
+      if (latest?.job_id !== options.resume) throw new DsearchError("STALE_EPOCH");
+      targetGenId = String(prior.generation_id);resumeCursor = JSON.parse(String(prior.cursor_json));
+      if (!resumeCursor?.checkpoint) throw new DsearchError("INVALID_REQUEST");
+      if (prior.directory_path !== join(state.root,'generations',targetGenId)) throw new DsearchError('SCOPE_DENIED');
+    }
+    const directory = join(state.root, "generations", targetGenId), created = timestamp();
     const existing = state.db.prepare("SELECT profile_fp,manifest_json FROM profiles WHERE profile_id=?").get(profile.profile_id);
     if (existing && (existing.profile_fp !== fp || existing.manifest_json !== canonicalJSON(profile))) throw new DsearchError("COMPATIBILITY_FAILED");
     state.transaction(() => {
       if (!existing) state.db.prepare("INSERT INTO profiles VALUES (?,?,?,'draft',?)").run(profile.profile_id, fp, canonicalJSON(profile), created);
-      state.db.prepare("INSERT INTO generations VALUES (?,?,?,'building',?,?,NULL,?,?,NULL)").run(genId, profile.profile_id, fp, directory, state.sourceSeq, "{}", created);
-      state.db.prepare("INSERT INTO jobs VALUES (?,?,?,?,'queued','queued','{}','{}',0,0,NULL,NULL,NULL,?)").run(jobId, digest(canonicalJSON(["full-build", genId, fp, state.sourceSeq])), options.publish === false ? 'profile-build' : "full-build", genId, created);
+      if (prior) {
+        state.db.prepare('DELETE FROM passages WHERE generation_id=?').run(targetGenId);state.db.prepare('DELETE FROM generation_documents WHERE generation_id=?').run(targetGenId);
+        state.db.prepare("UPDATE generations SET state='building',manifest_sha256=NULL,sealed_at=NULL WHERE generation_id=?").run(targetGenId);
+      } else state.db.prepare("INSERT INTO generations VALUES (?,?,?,'building',?,?,NULL,?,?,NULL)").run(genId, profile.profile_id, fp, directory, state.sourceSeq, "{}", created);
+      state.db.prepare("INSERT INTO jobs VALUES (?,?,?,?,'queued','queued','{}','{}',0,0,NULL,NULL,NULL,?)").run(jobId, digest(canonicalJSON(["full-build", targetGenId, fp, jobId])), prior ? String(prior.kind) : options.publish === false ? 'profile-build' : "full-build", targetGenId, created);
+      if (resumeCursor) state.db.prepare("UPDATE jobs SET cursor_json=?,attempt=? WHERE job_id=?").run(canonicalJSON(resumeCursor),Number(prior!.attempt)+1,jobId);
     });
+    const unpin=pinGeneration(state,targetGenId,"builder");
     const controller = new AbortController();
     // Defer execution until the caller has received the persisted queued job ID.
-    const completion = Promise.resolve().then(() => this.perform(jobId, genId, directory, fp, controller.signal, options.publish !== false, options.full === true)).finally(() => { if (this.active?.handle.job_id === jobId) this.active = undefined; });
-    const handle = { job_id: jobId, generation_id: genId, completion };this.active = { controller, handle };void completion.catch(() => {});return handle;
+    const completion = Promise.resolve().then(() => this.perform(jobId, targetGenId, directory, fp, controller.signal, prior ? prior.kind === "full-build" : options.publish !== false, options.full === true, resumeCursor)).finally(() => { unpin();if (this.active?.handle.job_id === jobId) this.active = undefined; });
+    const handle = { job_id: jobId, generation_id: targetGenId, completion };this.active = { controller, handle };void completion.catch(() => {});return handle;
   }
   async close(): Promise<void> { this.closing = true;const active = this.active;if (active) { active.controller.abort();await active.handle.completion.catch(() => {}); } }
   private phase(jobId: string, phase: string, progress: object = {}): void {
     this.catalog.state.db.prepare("UPDATE jobs SET state='running',phase=?,progress_json=?,updated_at=? WHERE job_id=?").run(phase, canonicalJSON(progress), timestamp(), jobId);
   }
-  private async perform(jobId: string, genId: string, directory: string, fp: string, signal: AbortSignal, publish: boolean, full: boolean): Promise<BuildResult> {
-    const state = this.catalog.state, profile = this.options.profile, builder = new QmdWorker();let reader: QmdWorker | undefined;
+  private async perform(jobId: string, genId: string, directory: string, fp: string, signal: AbortSignal, publish: boolean, full: boolean, resumeCursor?: CheckpointCursor): Promise<BuildResult> {
+    const state = this.catalog.state, profile = this.options.profile, builder = new QmdWorker();let reader: QmdWorker | undefined, releaseBase:(()=>void)|undefined;
     const check = () => { if (signal.aborted) throw new DsearchError("CANCELLED"); };
+    const owner=process.pid+':'+jobId;
+    const heartbeat=()=>state.db.prepare('UPDATE jobs SET lease_owner=?,lease_expires_at=? WHERE job_id=?').run(owner,new Date(Date.now()+60000).toISOString(),jobId);
+    heartbeat();const timer=setInterval(heartbeat,10000);timer.unref();
     let releaseLane!: () => void;
     try {
       if (this.options.lane) {
@@ -79,13 +100,21 @@ export class GenerationBuilder {
       const internal: Record<string, { path: string; pattern: string }> = {}, semantic: string[] = [], names = new Map<string, { semantic: string; lexical: string }>();
       for (const collection of collections) {
         const suffix = collection.collection_id.replaceAll("-", ""), sem = "s_" + suffix, lex = "l_" + suffix;
-        for (const key of [sem, lex]) { const path = join(directory, "projection", key);await mkdir(path, { mode: 0o700 });internal[key] = { path, pattern: "**/*.md" }; }
+        for (const key of [sem, lex]) { const path = join(directory, "projection", key);await mkdir(path, { recursive:true, mode: 0o700 });internal[key] = { path, pattern: "**/*.md" }; }
         names.set(collection.collection_id, { semantic: sem, lexical: lex });semantic.push(sem);
       }
       const engine: OpenEngine = { engineRoot: this.options.engineRoot, dbPath: join(directory, "qmd.sqlite"), collectionPath: join(directory, "projection"), modelRoot: this.options.modelRoot, embedRole: this.options.embedRole, strict: true, role: "builder", generationId: genId, collections: internal, semanticCollections: semantic };
-      const reuse = full ? undefined : await snapshotForReuse(this.catalog, fp, engine, signal);
-      await builder.open(engine);check();
-      if (!reuse) {
+      const restored = resumeCursor ? await loadCheckpoint(directory,resumeCursor) : undefined;
+      if (restored) {
+        const plan=restored.plan;
+        if(plan.profile_fp!==fp||plan.generation_id!==genId||plan.source_seq!==sourceSeq||plan.expected_epoch!==expectedEpoch||canonicalJSON(plan.engine)!==canonicalJSON(engine)||canonicalJSON(plan.inputs.map(i=>[i.doc_id,i.revision_id,i.relative_path,i.scope_fp]).sort())!==canonicalJSON(docs.filter(d=>d.eligibility==='eligible'&&d.latest_revision_id).map(d=>[d.doc_id,d.latest_revision_id,d.relative_path,scopes[d.collection_id]]).sort()))throw new DsearchError('STALE_EPOCH');
+        for(const input of plan.inputs)await this.catalog.readDocument(input.doc_id,input.revision_id);
+        await rm(engine.dbPath+'-wal',{force:true});await rm(engine.dbPath+'-shm',{force:true});await atomicFile(engine.dbPath,await readFile(join(directory,restored.checkpoint.database)));
+      }
+      const reuse = full || restored ? undefined : await snapshotForReuse(this.catalog, fp, engine, signal);
+      releaseBase=reuse?.release;
+      const opened=await builder.open(engine) as {capabilities?:{boundedEmbedCalls?:boolean}};check();
+      if (!reuse && !restored) {
         const probe = await builder.invoke<EngineResponse<{ dimension: number; norm: number }>>("embedding", { text: "dsearch dimension validation probe", title: "", isQuery: true }, { signal });
         if (probe.result.dimension !== profile.models.embed.dimension || !Number.isFinite(probe.result.norm) || probe.result.norm <= 0) throw new DsearchError("COMPATIBILITY_FAILED");
       }
@@ -96,7 +125,8 @@ export class GenerationBuilder {
       const inputs: SourceInput[] = [];let reusedDocuments = 0;
       const coverage: GenerationDocument[] = [], mappings: IndexedPassage[] = [], files: string[] = [];
       let completed = 0;
-      for (const doc of docs) {
+      if(restored){coverage.push(...restored.plan.coverage);mappings.push(...restored.plan.mappings);files.push(...restored.plan.files);inputs.push(...restored.plan.inputs);reusedDocuments=restored.plan.reused_documents;}
+      for (const doc of restored ? [] : docs) {
         check();this.phase(jobId, "compiling", { completed, total: docs.length });
         if (doc.eligibility !== "eligible" || !doc.latest_revision_id) {
           coverage.push({ doc_id: doc.doc_id, revision_id: doc.latest_revision_id, collection_id: doc.collection_id, state: doc.eligibility === "pending" ? "pending" : ["unreadable", "invalid_metadata", "unsupported_encoding"].includes(doc.eligibility) ? "failed" : "excluded", reason: doc.eligibility_reason, coverage: [] });completed++;continue;
@@ -133,9 +163,22 @@ export class GenerationBuilder {
       this.phase(jobId, "indexing", { passages: mappings.length });await builder.invoke("update", {}, { signal });
       const semanticPassages = mappings.filter(p => p.kind === "semantic").length;
       this.phase(jobId, "embedding", { completed: 0, total: semanticPassages });
-      const embedded = await builder.invoke<EngineResponse<{ results: { errors: number }[] }>>("embed", {}, { signal, timeoutMode: "idle", onProgress: event => {
-        if (event.phase === "embedding-batch") this.phase(jobId, "embedding", { completed: Math.min(event.completed, semanticPassages), total: semanticPassages });
-      } });
+      let embedded: EngineResponse<{results:{errors:number}[]}>;
+      if(opened.capabilities?.boundedEmbedCalls){
+        const plan:BuildPlan={schema_version:1,generation_id:genId,profile_fp:fp,source_seq:sourceSeq,expected_epoch:expectedEpoch,publish,engine,inputs,coverage,mappings,files,reused_documents:reusedDocuments};
+        const checkpoints=new BuildCheckpoints(state,jobId,directory,plan);await checkpoints.initialize();await checkpoints.save(builder,0,signal);await this.options.fault?.('checkpoint-initial');check();
+        const results:{errors:number}[]=[];let embeddingCalls=0,finished=0;
+        for(const collection of semantic){let remaining:number;do{
+          const step=await builder.invoke<EngineResponse<{errors:number;docsProcessed:number;remainingDocs:number}>>('embed_step',{collection},{signal,timeoutMode:'idle'});
+          results.push(step.result);embeddingCalls+=Number(step.stats.embeddingCalls);finished+=step.result.docsProcessed;remaining=step.result.remainingDocs;
+          if(!Number.isSafeInteger(remaining)||remaining<0||step.result.errors)throw new DsearchError('MODEL_UNAVAILABLE');
+          await this.options.fault?.('batch-before-checkpoint');check();await checkpoints.save(builder,Math.min(finished,semanticPassages),signal);
+          this.phase(jobId,'embedding',{completed:Math.min(finished,semanticPassages),total:semanticPassages});await this.options.fault?.('checkpoint-batch');check();
+        }while(remaining);}
+        embedded={result:{results},stats:{embeddingCalls},duration_ms:0,rss_bytes:0};
+      }else{
+        embedded=await builder.invoke<EngineResponse<{results:{errors:number}[]}>>('embed',{}, {signal,timeoutMode:'idle',onProgress:event=>{if(event.phase==='embedding-batch')this.phase(jobId,'embedding',{completed:Math.min(event.completed,semanticPassages),total:semanticPassages});}});
+      }
       if (embedded.result.results.some(r => r.errors !== 0)) {
         for (const doc of coverage) if (["included", "partial"].includes(doc.state)) { doc.state = "failed";doc.reason = "failed_embedding"; }
         state.db.prepare("UPDATE generations SET coverage_json=? WHERE generation_id=?").run(canonicalJSON(coverage), genId);
@@ -192,6 +235,6 @@ export class GenerationBuilder {
       const cancelled = signal.aborted || (e instanceof DsearchError && e.code === "CANCELLED"), code = e instanceof DsearchError ? e.code : "INTERNAL_ERROR";
       state.transaction(() => { state.db.prepare("UPDATE generations SET state='invalid' WHERE generation_id=?").run(genId);state.db.prepare("UPDATE jobs SET state=?,phase='stopped',error_code=?,updated_at=? WHERE job_id=?").run(cancelled ? "cancelled" : "failed", cancelled ? "CANCELLED" : code, timestamp(), jobId); });
       throw new DsearchError(cancelled ? "CANCELLED" : code);
-    } finally { try { await builder.close();if (reader) await reader.close(); } finally { releaseLane?.(); } }
+    } finally { releaseBase?.();clearInterval(timer);state.db.prepare("UPDATE jobs SET lease_owner=NULL,lease_expires_at=NULL WHERE job_id=?").run(jobId);try { await builder.close();if (reader) await reader.close(); } finally { releaseLane?.(); } }
   }
 }

@@ -50,6 +50,13 @@ export class ProfileController {
     void handle.completion.finally(() => { if (this.staging === builder) this.staging = undefined; }).catch(() => {});
     return handle;
   }
+  resume(jobId:string) {
+    if(this.closing)throw new DsearchError('SERVICE_UNAVAILABLE');if(this.busy)throw new DsearchError('BUSY');
+    const row=this.catalog.state.db.prepare('SELECT g.profile_id FROM jobs j JOIN generations g USING(generation_id) WHERE j.job_id=?').get(jobId);if(!row)throw new DsearchError('NOT_FOUND');
+    const target=this.resolve(String(row.profile_id)),builder=this.makeBuilder(target),handle=builder.start({resume:jobId});this.staging=builder;
+    void handle.completion.then(result=>{if(result.published){this.selected=target;this.currentBuilder=this.makeBuilder(target);}},()=>{});
+    void handle.completion.finally(()=>{if(this.staging===builder)this.staging=undefined;}).catch(()=>{});return handle;
+  }
   async activate(profileId: string, generationId: string, expectedEpoch: number, signal: AbortSignal, progress: (phase: string) => void) {
     const target = this.resolve(profileId), fp = digest(canonicalJSON(target));
     progress('waiting-model');

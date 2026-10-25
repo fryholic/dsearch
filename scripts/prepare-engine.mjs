@@ -3,9 +3,10 @@ import {readFile,writeFile,mkdir,copyFile,access,symlink,realpath} from 'node:fs
 import {createHash} from 'node:crypto';
 import {resolve,join} from 'node:path';
 import {engineArtifact,fileDigest} from '../packages/runtime/dist/index.js';
-const root=resolve(import.meta.dirname,'..');const engine=join(root,'.local/qmd-upstream');
-const source=JSON.parse(await readFile(join(root,'vendor/qmd-upstream.json'),'utf8'));
-const patch=await readFile(join(root,'vendor/qmd-patches/compat-v1.patch'));
+const root=resolve(import.meta.dirname,'..'),recovery=process.argv.includes('--recovery');const engine=join(root,recovery?'.local/qmd-recovery':'.local/qmd-upstream');
+const registry=JSON.parse(await readFile(join(root,'vendor/qmd-upstream.json'),'utf8'));
+const source=recovery?{...registry,...registry.recovery}:registry;
+const patchPath=join(root,'vendor/qmd-patches',source.patchFile??'compat-v1.patch'),patch=await readFile(patchPath);
 const hash=x=>createHash('sha256').update(x).digest('hex');
 function run(cmd,args,cwd=root,options={}) {
  const r=spawnSync(cmd,args,{cwd,encoding:'utf8',stdio:['pipe','pipe','pipe'],maxBuffer:32*1024*1024,...options});
@@ -20,7 +21,7 @@ if(!await access(join(engine,'.git')).then(()=>true,()=>false)) {
 }
 if(run('git',['rev-parse','HEAD'],engine).trim()!==source.commit)throw new Error('Managed engine checkout is at another commit');
 let diff=Buffer.from(run('git',['diff','HEAD','--','src'],engine));
-if(diff.length===0)run('git',['apply',join(root,'vendor/qmd-patches/compat-v1.patch')],engine);
+if(diff.length===0)run('git',['apply',patchPath],engine);
 else if(hash(diff)!==hash(patch))throw new Error('Managed source has changes other than the pinned patch');
 // Include the added compatibility source in the patch identity without making an upstream commit.
 run('git',['add','-N','src/dsearch-compat.ts'],engine);
@@ -62,3 +63,5 @@ run(process.execPath,['scripts/build.mjs'],reference);
 const referenceArtifact=await engineArtifact(reference);
 await writeFile(join(reference,'dsearch-artifact.json'),JSON.stringify({upstream_commit:source.commit,artifact_sha256:referenceArtifact.sha256,files:referenceArtifact.files},null,2)+'\n');
 console.log(JSON.stringify({engine:source.commit,patch_digest:manifest.patch_digest,artifact_sha256:manifest.artifact_sha256,reference:'unpatched',status:'prepared'},null,2));
+
+if(!recovery)process.stdout.write(run(process.execPath,[import.meta.filename,"--recovery"]));

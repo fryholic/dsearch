@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { StateStore, Catalog, canonicalJSON, digest } from '@dsearch/catalog';
-import { createAlphaProfile, atomicFile } from '@dsearch/generations';
+import { createAlphaProfile, atomicFile, reconcileInterruptedBuilds } from '@dsearch/generations';
 import { ReaderPool, SourceSearch, SearchSessions } from '@dsearch/search';
 import { API_VERSION, DsearchError, ErrorCode, CollectionRequest, ReadRequest, ProfileManifest, DocumentRef } from '@dsearch/contracts';
 import { CollectionInfo, CollectionPatch, ReconcileRequest, JobInfo, AppStatus, ReadResponse, ExportRequest, CoverageRequest, ModelAction, ActivateRequest, RollbackRequest, PrepareProfileRequest, retryableJobCode } from '@dsearch/contracts/control';
@@ -83,8 +83,8 @@ export async function createApplication(options: ApplicationOptions = {}) {
     const root = await privateRoot(resolve(options.dataRoot ?? join(homedir(), 'Library/Application Support/dsearch'))), instance = randomUUID(), release = await takeOwnership(root, instance);
     let state: StateStore | undefined, auth: LocalAuth | undefined, stopWorkers: (() => Promise<void>) | undefined, startupCleanup: (() => Promise<void>) | undefined;
     try {
-        state = await StateStore.open(root);
-        const catalog = new Catalog(state), engineRoot = options.engineRoot ?? join(workspace, '.local/qmd-upstream'), modelRoot = options.modelRoot ?? join(workspace, '.local/models');
+        state = await StateStore.open(root);reconcileInterruptedBuilds(state);
+        const catalog = new Catalog(state), engineRoot = options.engineRoot ?? join(workspace, '.local/qmd-recovery'), modelRoot = options.modelRoot ?? join(workspace, '.local/models');
         const knownProfiles = options.profile ? [ProfileManifest.parse(options.profile)] : (await Promise.all([createAlphaProfile(engineRoot), createAlphaProfile(engineRoot, 'reference')])).map(p => p.manifest);
         const models = await ModelManager.open(modelRoot), managed = new ManagedJobs(state), lane = new HeavyLane();
         let profiles: ProfileController;
@@ -168,7 +168,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
             if (path === '/v1/settings' && req.method === 'PUT') { json(res, 200, envelope(await preferences.set(await body(req)), requestId));return; }
             if (path === '/v1/diagnostics' && req.method === 'POST') {
                 const input = await body(req);if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) throw new DsearchError('INVALID_REQUEST');
-                const current = status();json(res, 200, envelope({ diagnostic_version: 1, created_at: new Date().toISOString(), runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, version: current.version, generation: current.generation, profile: current.profile, execution: current.execution, needs_rebuild: current.needs_rebuild, scope_incomplete: current.scope_incomplete, coverage: current.coverage, jobs: current.jobs.map(job => ({ state: job.state, phase: job.phase, error_code: job.error_code })), storage_policy: { queries: 'memory-only', results: 'memory-only', source_writes: false }, capabilities: { mcp: true, incremental_sync: false, backup_restore: false, deep: false } }, requestId));return;
+                const current = status();json(res, 200, envelope({ diagnostic_version: 1, created_at: new Date().toISOString(), runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, version: current.version, generation: current.generation, profile: current.profile, execution: current.execution, needs_rebuild: current.needs_rebuild, scope_incomplete: current.scope_incomplete, coverage: current.coverage, jobs: current.jobs.map(job => ({ state: job.state, phase: job.phase, error_code: job.error_code })), storage_policy: { queries: 'memory-only', results: 'memory-only', source_writes: false }, capabilities: { mcp: true, incremental_sync: true, backup_restore: false, deep: false } }, requestId));return;
             }
             if (path === '/v1/documents/open' && req.method === 'POST') {
                 const parsed = DocumentRef.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
@@ -309,10 +309,11 @@ export async function createApplication(options: ApplicationOptions = {}) {
             if (retryJob && req.method === 'POST') {
                 if (!PrepareProfileRequest.safeParse(await body(req)).success) throw new DsearchError('INVALID_REQUEST');if (managed.busy || profiles.busy) throw new DsearchError('BUSY');
                 const row = store.db.prepare('SELECT * FROM jobs WHERE job_id=?').get(retryJob[1]!);if (!row) throw new DsearchError('NOT_FOUND');
-                if (!['failed','obsolete'].includes(String(row.state)) || !retryableJobCode(row.error_code == null ? null : String(row.error_code))) throw new DsearchError('INVALID_REQUEST');
+                const cursor=JSON.parse(String(row.cursor_json));
+                if (!['failed','obsolete','cancelled'].includes(String(row.state)) || (!cursor.checkpoint && !retryableJobCode(row.error_code == null ? null : String(row.error_code)))) throw new DsearchError('INVALID_REQUEST');
                 if (['full-build','profile-build'].includes(String(row.kind))) {
                     const target = store.db.prepare('SELECT profile_id FROM generations WHERE generation_id=?').get(String(row.generation_id));if (!target) throw new DsearchError('NOT_FOUND');
-                    const accepted = profiles.prepare(String(target.profile_id), row.kind === 'full-build');json(res, 202, envelope({ job_id: accepted.job_id, generation_id: accepted.generation_id, state: 'queued' }, requestId));return;
+                    const accepted = cursor.checkpoint ? profiles.resume(retryJob[1]!) : profiles.prepare(String(target.profile_id), row.kind === 'full-build');json(res, 202, envelope({ job_id: accepted.job_id, generation_id: accepted.generation_id, state: 'queued' }, requestId));return;
                 }
                 const meta = JSON.parse(String(row.cursor_json)) as { profile_id?: string };if (!meta.profile_id) throw new DsearchError('INVALID_REQUEST');const target = profiles.resolve(meta.profile_id);
                 const kind = String(row.kind);if (!['model-check','model-prepare','profile-activate'].includes(kind)) throw new DsearchError('INVALID_REQUEST');

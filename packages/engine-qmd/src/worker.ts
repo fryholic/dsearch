@@ -82,13 +82,17 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
   }
   if (!store) throw new DsearchError("COMPATIBILITY_FAILED");
   const args = object(payload.args ?? {}), current = store;
-  if (role === "reader" && ["update", "embed"].includes(method)) throw new DsearchError("SCOPE_DENIED");
+  if (role === "reader" && ["update", "embed", "embed_step"].includes(method)) throw new DsearchError("SCOPE_DENIED");
   const stats = strict ? sdk.compatibilityStats() : {};
   requestStats = stats;
   let embeddingOffset = 0;
   const operation = async (): Promise<unknown> => {
     switch (method) {
       case "update": return current.update();
+      case "embed_step": {
+        if (!sdk.dsearchCapabilities?.boundedEmbedCalls || !semanticCollections.includes(string(args.collection))) throw new DsearchError("COMPATIBILITY_FAILED");
+        return current.embed({ collection: string(args.collection), maxDocsPerCall: 4, maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
+      }
       case "embed": {
         if (role === "probe") return current.embed({ maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
         const results = [];
@@ -233,3 +237,6 @@ process.on("message", message => {
     send({ version: 1, id, type: "response", ok: false, code, reason: ErrorReason.safeParse(error?.reason).success ? error.reason : code === "RERANK_UNAVAILABLE" ? "RERANK_EXECUTION_FAILED" : undefined, telemetry: requestStats });
   }).finally(() => { active = undefined; });
 });
+
+// A daemon killed without cleanup must not leave a native model or SQLite writer alive.
+process.on("disconnect", () => process.exit(0));

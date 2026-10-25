@@ -18,9 +18,9 @@ export class QmdWorker {
   async open(options: OpenEngine): Promise<unknown> {
     await loadEngineArtifact(options.engineRoot, join(options.engineRoot, "dsearch-artifact.json"));
     if (options.strict) {
-      const expected = JSON.parse(await readFile(new URL("../../../vendor/qmd-upstream.json", import.meta.url), "utf8")) as { commit: string; engineArtifactSha256: string; patchSha256: string };
+      const expected = JSON.parse(await readFile(new URL("../../../vendor/qmd-upstream.json", import.meta.url), "utf8")) as { commit: string; engineArtifactSha256: string; patchSha256: string; recovery?: { engineArtifactSha256: string; patchSha256: string } };
       const actual = JSON.parse(await readFile(join(options.engineRoot, "dsearch-artifact.json"), "utf8")) as { upstream_commit: string; artifact_sha256: string; patch_digest: string };
-      if (actual.upstream_commit !== expected.commit || actual.artifact_sha256 !== expected.engineArtifactSha256 || actual.patch_digest !== expected.patchSha256) throw new DsearchError("COMPATIBILITY_FAILED");
+      if (actual.upstream_commit !== expected.commit || ![expected, expected.recovery].some(pin => pin && actual.artifact_sha256 === pin.engineArtifactSha256 && actual.patch_digest === pin.patchSha256)) throw new DsearchError("COMPATIBILITY_FAILED");
     }
     const registry = JSON.parse(await readFile(new URL("../../../vendor/models/registry.json", import.meta.url), "utf8")) as { models: ModelFile[] };
     const embed = registry.models.find(m => m.role === options.embedRole);
