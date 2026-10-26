@@ -129,6 +129,7 @@ export class GenerationBuilder {
       for (const passage of reuse?.mappings ?? []) { const list = previousPassagesById.get(passage.doc_id) ?? [];list.push(passage);previousPassagesById.set(passage.doc_id,list); }
       const inputs: SourceInput[] = [];let reusedDocuments = 0;
       const coverage: GenerationDocument[] = [], mappings: IndexedPassage[] = [], files: string[] = [];
+      const reusedFiles: string[] = [];
       let completed = 0;
       if(restored){coverage.push(...restored.plan.coverage);mappings.push(...restored.plan.mappings);files.push(...restored.plan.files);inputs.push(...restored.plan.inputs);reusedDocuments=restored.plan.reused_documents;}
       for (const doc of restored ? [] : docs) {
@@ -144,7 +145,7 @@ export class GenerationBuilder {
           coverage.push(previousCoverage);
           for (const passage of previousPassagesById.get(doc.doc_id) ?? []) {
             const path = "projection/" + passage.engine_collection + "/" + passage.engine_relative_path;
-            await atomicFile(join(directory,path), await readFile(join(reuse!.directory,path)));files.push(path);mappings.push(passage);
+            reusedFiles.push(path);files.push(path);mappings.push(passage);
           }
           reusedDocuments++;completed++;continue;
         }
@@ -164,6 +165,18 @@ export class GenerationBuilder {
           const { text: _text, ...metadata } = passage;mappings.push({ ...metadata, engine_collection: collectionName, engine_relative_path: relative });
         }
         completed++;
+      }
+      // Each file still commits its own data and directory entry. Bound the I/O
+      // fan-out and drain every batch before indexing, cancellation or failure.
+      for (let offset = 0; offset < reusedFiles.length; offset += 16) {
+        check();
+        const copied = await Promise.allSettled(reusedFiles.slice(offset, offset + 16).map(async path => {
+          const bytes = await readFile(join(reuse!.directory, path));check();
+          await atomicFile(join(directory, path), bytes);
+        }));
+        const failure = copied.find(result => result.status === 'rejected');
+        if (failure?.status === 'rejected') throw failure.reason;
+        await this.options.fault?.('reuse-copy-batch');check();
       }
       this.phase(jobId, "indexing", { passages: mappings.length });await builder.invoke("update", {}, { signal });
       const semanticPassages = mappings.filter(p => p.kind === "semantic").length;
