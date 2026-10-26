@@ -21,3 +21,10 @@ test('SIGKILL at a committed batch releases native workers and restarts from the
   const builder=new GenerationBuilder(catalog,options),handle=builder.start({resume:message.job_id}),result=await handle.completion;assert.equal(result.generation_id,message.generation_id);assert.ok(builder.getJob(handle.job_id).progress.embedding_calls<17);await verifySeal(join(state.root,'generations',result.generation_id),result.manifest_sha256);
  }finally{state.close();await rm(folder,{recursive:true,force:true});}
 });
+
+test('a crash after the publication commit preserves the new active generation and terminal job',async()=>{
+ await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/commit-kill-')),source=join(folder,'source');await mkdir(source);await writeFile(join(source,'guide.md'),'# Project guide\n\nRecord the milestone owner.');const state=await StateStore.open(join(folder,'data')),catalog=new Catalog(state);await catalog.addCollection({name:'Projects',root:source});
+ try{
+  const child=fork(join(root,'tests/fixtures/build-crash.mjs'),[state.root,engineRoot,modelRoot,'after-publish'],{stdio:['ignore','ignore','ignore','ipc'],execArgv:[]}),exited=once(child,'exit'),[message]=await once(child,'message'),[code,signal]=await exited;assert.equal(message.phase,'after-publish',JSON.stringify(message));assert.equal(code,null);assert.equal(signal,'SIGKILL');reconcileInterruptedBuilds(state);const active=state.db.prepare('SELECT g.* FROM active_slot a JOIN generations g USING(generation_id)').get();assert.equal(active.generation_id,message.generation_id);assert.equal(active.state,'active');await verifySeal(active.directory_path,active.manifest_sha256);const job=state.db.prepare('SELECT state,lease_owner FROM jobs WHERE job_id=?').get(message.job_id);assert.equal(job.state,'succeeded');assert.equal(job.lease_owner,null);
+ }finally{state.close();await rm(folder,{recursive:true,force:true});}
+});

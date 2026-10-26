@@ -42,3 +42,10 @@ test('deadline of an unresponsive worker waits for exit and is distinct from use
   await worker.invoke({op:'echo'});await assert.rejects(worker.invoke({op:'stall'},{timeoutMs:80,timeoutMode:'idle'}),{code:'WORKER_TIMEOUT'});assert.equal(worker.state,'stopped');assert.throws(()=>process.kill(worker.pid,0),{code:'ESRCH'});
  }finally{await worker.close();}
 });
+
+
+test('a real bounded V8 heap exhaustion is distinct from cancellation and unknown process exit',async()=>{
+ const worker=new EngineProcess(entry,{execArgv:['--max-old-space-size=32']});try{
+  await assert.rejects(worker.invoke({op:'oom'}),{code:'RESOURCE_EXHAUSTED'});assert.equal(worker.state,'stopped');assert.throws(()=>process.kill(worker.pid,0),{code:'ESRCH'});assert.ok(worker.diagnostics.discardedBytes>0);assert.deepEqual(Object.keys(worker.diagnostics),['discardedBytes']);
+ }finally{await worker.close();}
+});

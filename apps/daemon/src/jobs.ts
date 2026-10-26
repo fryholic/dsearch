@@ -2,18 +2,20 @@ import { randomUUID } from 'node:crypto';
 import { DsearchError, ErrorCode } from '@dsearch/contracts';
 import { JobInfo, retryableJobCode } from '@dsearch/contracts/control';
 import { canonicalJSON, type StateStore } from '@dsearch/catalog';
-type Kind = 'model-prepare' | 'model-check' | 'profile-activate';
+type Kind = 'model-prepare' | 'model-check' | 'profile-activate' | 'backup' | 'generation-gc';
 type Progress = (phase: string, counts?: Record<string, number>) => void;
 export class ManagedJobs {
   private readonly active = new Map<string, { controller: AbortController; completion: Promise<void> }>();
   private closing = false;
   constructor(private readonly state: StateStore) {
-    state.db.prepare("UPDATE jobs SET state='obsolete',phase='interrupted',error_code='WORKER_EXITED',updated_at=? WHERE kind IN ('model-prepare','model-check','profile-activate') AND state IN ('queued','running','retry_wait')").run(new Date().toISOString());
+    state.db.prepare("UPDATE jobs SET state='obsolete',phase='interrupted',error_code='WORKER_EXITED',updated_at=? WHERE kind IN ('model-prepare','model-check','profile-activate','backup','generation-gc') AND state IN ('queued','running','retry_wait')").run(new Date().toISOString());
   }
   get busy() { return this.active.size > 0; }
   info(id: string): JobInfo {
     const row = this.state.db.prepare('SELECT * FROM jobs WHERE job_id=?').get(id);if (!row) throw new DsearchError('NOT_FOUND');
-    return JobInfo.parse({ job_id: row.job_id, kind: row.kind, generation_id: row.generation_id, state: row.cancel_requested && ['queued', 'running'].includes(String(row.state)) ? 'cancel_requested' : row.state, phase: row.phase, progress: JSON.parse(String(row.progress_json)), error_code: row.error_code, retryable: ['failed', 'obsolete'].includes(String(row.state)) && retryableJobCode(row.error_code == null ? null : String(row.error_code)), updated_at: row.updated_at });
+    const cursor=JSON.parse(String(row.cursor_json)),generation=row.generation_id?this.state.db.prepare('SELECT state FROM generations WHERE generation_id=?').get(String(row.generation_id)):undefined,latest=row.generation_id?this.state.db.prepare('SELECT job_id FROM jobs WHERE generation_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(String(row.generation_id)):undefined;
+    const canResume=!!cursor.checkpoint&&generation?.state==='invalid'&&latest?.job_id===id;
+    return JobInfo.parse({ job_id: row.job_id, kind: row.kind, generation_id: row.generation_id, state: row.cancel_requested && ['queued', 'running'].includes(String(row.state)) ? 'cancel_requested' : row.state, phase: row.phase, progress: JSON.parse(String(row.progress_json)), error_code: row.error_code, retryable: row.kind!=='generation-gc' && ['failed','obsolete','cancelled'].includes(String(row.state)) && (cursor.checkpoint?canResume:retryableJobCode(row.error_code == null ? null : String(row.error_code))), updated_at: row.updated_at });
   }
   start(kind: Kind, operation: (signal: AbortSignal, progress: Progress) => Promise<void>, generationId: string | null = null, metadata: { profile_id?: string } = {}) {
     if (this.closing) throw new DsearchError('SERVICE_UNAVAILABLE');if (this.busy) throw new DsearchError('BUSY');

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm,stat,access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {DatabaseSync} from 'node:sqlite';
-import {randomUUID} from 'node:crypto';
+import {DatabaseSync,backup as sqliteBackup} from 'node:sqlite';
+import {randomUUID,createHash} from 'node:crypto';
 import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
 import {BackupStore,readBackup,GenerationGC,pinGeneration} from '../../packages/generations/dist/index.js';
 async function fixture(t){const temporary=await mkdtemp(join(tmpdir(),'dsearch-backup-')),state=await StateStore.open(temporary),root=state.root,catalog=new Catalog(state);t.after(async()=>{state.close();await rm(root,{recursive:true,force:true});});state.db.prepare("INSERT INTO profiles VALUES ('profile',?,'{}','validated',?)").run('a'.repeat(64),new Date().toISOString());const id=randomUUID(),generation=join(root,'generations',id);await mkdir(generation,{recursive:true,mode:0o700});await writeFile(join(generation,'fixture.md'),'original index bytes');state.db.prepare("INSERT INTO generations VALUES (?,?,?,'invalid',?,0,NULL,'{}',?,NULL)").run(id,'profile','a'.repeat(64),generation,new Date().toISOString());return {root,state,catalog,id};}
@@ -22,4 +22,16 @@ test('an unpublished failed backup cannot replace a successful one and retention
 });
 test('a completed backup survives loss of its acknowledgement',async t=>{
  const {catalog}=await fixture(t),store=new BackupStore(catalog,{fault:phase=>{if(phase==='backup-after-publish')throw new Error('lost acknowledgement');}});await assert.rejects(store.create(),/lost acknowledgement/);const list=await store.list();assert.equal(list.length,1);await readBackup(list[0].path);
+});
+
+test('backups are self-contained for recorded scope-migration snapshots',async t=>{
+ const {root,state,catalog}=await fixture(t),source=await mkdtemp(join(tmpdir(),'dsearch-migration-source-'));t.after(()=>rm(source,{recursive:true,force:true}));await writeFile(join(source,'guide.md'),'# Guide\n\nDocument the project owner.');const collection=await catalog.addCollection({name:'Projects',root:source}),row=state.db.prepare('SELECT scope_json,scope_fp FROM collections WHERE collection_id=?').get(collection.collection_id),relative='backups/state-before-policy-v2-'+randomUUID()+'.sqlite';await mkdir(join(root,'backups'),{recursive:true,mode:0o700});await sqliteBackup(state.db,join(root,relative));state.db.prepare("INSERT INTO scope_migrations VALUES (?,?,?,?, 'matched',0,1,1)").run(collection.collection_id,row.scope_json,row.scope_fp,relative);
+ const info=await new BackupStore(catalog).create(),{manifest}=await readBackup(info.path);assert.ok(manifest.files.some(f=>f.path===relative));const copied=new DatabaseSync(join(info.path,relative),{readOnly:true});try{assert.equal(copied.prepare('PRAGMA integrity_check').get().integrity_check,'ok');assert.equal(copied.prepare('SELECT name FROM collections WHERE collection_id=?').get(collection.collection_id).name,'Projects');}finally{copied.close();}
+});
+
+test('a self-consistent backup cannot inject credentials or runtime ownership files',async t=>{
+ const {catalog}=await fixture(t),info=await new BackupStore(catalog).create(),{manifest}=await readBackup(info.path),sha=text=>createHash('sha256').update(text).digest('hex');
+ for(const path of ['credentials/device-token','runtime.json','daemon.lock.sqlite','generations/'+randomUUID()+'/engine-config.json']){
+  const changed={...manifest,files:[...manifest.files,{path,bytes:0,sha256:sha('')}]},json=JSON.stringify(changed);await writeFile(join(info.path,'manifest.json'),json);await writeFile(join(info.path,'manifest.sha256'),sha(json)+'\n');await assert.rejects(readBackup(info.path,false),{code:'COMPATIBILITY_FAILED'});
+ }
 });

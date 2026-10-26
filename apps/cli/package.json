@@ -13,6 +13,7 @@
     }
   },
   "dependencies": {
+    "@dsearch/app-daemon": "workspace:*",
     "@dsearch/app-mcp": "workspace:*",
     "@dsearch/contracts": "workspace:*",
     "@dsearch/runtime": "workspace:*"

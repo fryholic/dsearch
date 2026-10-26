@@ -41,3 +41,10 @@ test('manual indexing accepts an explicit full rebuild without arbitrary engine 
  assert.deepEqual(ReconcileRequest.parse({}),{full:false});assert.deepEqual(ReconcileRequest.parse({full:true}),{full:true});
  for(const value of [{full:'true'},{force:true},{dbPath:'/other'},null,[]])assert.equal(ReconcileRequest.safeParse(value).success,false);
 });
+
+import {GCPolicy,GCApply,MaintenanceResult} from '../../packages/contracts/dist/control.js';
+test('maintenance requires a concrete matching plan and rejects arbitrary filesystem options',()=>{
+ assert.deepEqual(GCPolicy.parse({}),{keep_retired:2,min_age_seconds:86400});
+ for(const value of [{path:'/other'},{keep_retired:-1},{min_age_seconds:'0'},{min_age_seconds:Infinity}])assert.equal(GCPolicy.safeParse(value).success,false);
+ assert.equal(GCApply.safeParse({}).success,false);assert.ok(GCApply.safeParse({plan_id:'a'.repeat(64)}).success);assert.equal(MaintenanceResult.safeParse({kind:'backup',path:'/other'}).success,false);
+});

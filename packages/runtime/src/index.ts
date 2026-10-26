@@ -20,21 +20,23 @@ export class EngineProcess {
   private closing: Promise<void> | undefined;
   private stateValue: WorkerState = "idle";
   private diagnosticBytes = 0;
-  constructor(entry: URL, options: { env?: Record<string, string>; cancelGraceMs?: number } = {}) {
+  private resourceExhausted = false;
+  private diagnosticTail = "";
+  constructor(entry: URL, options: { env?: Record<string, string>; cancelGraceMs?: number; execArgv?: string[] } = {}) {
     this.cancelGraceMs = options.cancelGraceMs ?? 3000;
-    this.child = fork(entry, [], { stdio: ["ignore", "pipe", "pipe", "ipc"], execArgv: [],
+    this.child = fork(entry, [], { stdio: ["ignore", "pipe", "pipe", "ipc"], execArgv: options.execArgv ?? [],
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
         LANG: "en_US.UTF-8", NODE_NO_WARNINGS: "1", ...options.env } });
     this.pid = this.child.pid!;
     // Native stdout/stderr can contain input or paths. Never forward or persist them.
     const discard = (chunk: Buffer) => { this.diagnosticBytes = Math.min(1_048_576, this.diagnosticBytes + chunk.length); };
-    this.child.stdout?.on("data", discard); this.child.stderr?.on("data", discard);
+    this.child.stdout?.on("data", discard); this.child.stderr?.on("data", (chunk:Buffer)=>{discard(chunk);const text=this.diagnosticTail+chunk.toString('utf8');this.resourceExhausted ||= /FATAL ERROR:[^\n]*(?:heap|Allocation)[^\n]*memory|std::bad_alloc|cannot allocate memory/i.test(text);this.diagnosticTail=text.slice(-512);});
     this.child.on("message", message => this.receive(message));
     this.child.on("error", () => this.fail(new DsearchError("WORKER_EXITED")));
     this.child.on("exit", () => {
       this.exited = true; this.stateValue = "stopped";
-      this.fail(new DsearchError(this.pending?.cancelCode ?? "WORKER_EXITED"));
     });
+    this.child.on("close",()=>this.fail(new DsearchError(this.pending?.cancelCode ?? (this.resourceExhausted ? "RESOURCE_EXHAUSTED" : "WORKER_EXITED"))));
   }
   private readonly cancelGraceMs: number;
   get state(): WorkerState { return this.stateValue; }
@@ -48,6 +50,7 @@ export class EngineProcess {
     let serialized: string;
     try { serialized = JSON.stringify(payload); } catch { return Promise.reject(new DsearchError("INVALID_REQUEST")); }
     if (!serialized || Buffer.byteLength(serialized) > 1_048_576) return Promise.reject(new DsearchError("INVALID_REQUEST"));
+    this.resourceExhausted=false;this.diagnosticTail="";
     this.stateValue = "running";
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
@@ -99,7 +102,7 @@ export class EngineProcess {
     if (record.ok === true) pending.finish(undefined, record.value);
     else {
       const parsed = ErrorCode.safeParse(record.code);
-      pending.finish(Object.assign(new DsearchError(parsed.success ? parsed.data : "INTERNAL_ERROR", undefined, false, ErrorReason.safeParse(record.reason).success ? ErrorReason.parse(record.reason) : undefined), { telemetry }));
+      pending.finish(Object.assign(new DsearchError(this.resourceExhausted ? "RESOURCE_EXHAUSTED" : parsed.success ? parsed.data : "INTERNAL_ERROR", undefined, false, ErrorReason.safeParse(record.reason).success ? ErrorReason.parse(record.reason) : undefined), { telemetry }));
     }
   }
   close(): Promise<void> {

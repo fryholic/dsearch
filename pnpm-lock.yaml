@@ -29,6 +29,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@dsearch/app-daemon':
+        specifier: workspace:*
+        version: link:../daemon
       '@dsearch/app-mcp':
         specifier: workspace:*
         version: link:../mcp

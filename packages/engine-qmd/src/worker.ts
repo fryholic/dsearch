@@ -25,7 +25,7 @@ type Module = {
   runDsearchRequest<T>(request: unknown, operation: () => Promise<T>): Promise<T>;
 };
 let sdk: Module, store: Store | undefined, cache: unknown, strict = true, engineRoot = "";
-let role: "probe" | "builder" | "reader" = "probe", allowedCollections = ["probe"], semanticCollections = ["probe"];
+let role: "probe" | "builder" | "reader" | "maintenance" = "probe", allowedCollections = ["probe"], semanticCollections = ["probe"];
 let active: { id: string; controller: AbortController } | undefined;
 let requestStats: Stats | undefined;
 let modelErrors: Record<string, unknown> = {};
@@ -59,7 +59,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
     strict = payload.strict === true;
     if (strict && !["EP-01", "EP-02", "EP-03", "EP-04"].every(key => sdk.dsearchCapabilities?.[key] === true))
       throw new DsearchError("COMPATIBILITY_FAILED");
-    if (payload.role !== undefined && !["probe", "builder", "reader"].includes(String(payload.role))) throw new DsearchError("INVALID_REQUEST");
+    if (payload.role !== undefined && !["probe", "builder", "reader", "maintenance"].includes(String(payload.role))) throw new DsearchError("INVALID_REQUEST");
     role = (payload.role ?? "probe") as typeof role;
     if (role !== "probe" && (typeof payload.generationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(payload.generationId))) throw new DsearchError("INVALID_REQUEST");
     if (role === "reader" && sdk.dsearchCapabilities?.sealedReadOnly !== true) throw new DsearchError("COMPATIBILITY_FAILED");
@@ -81,6 +81,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
     return { capabilities: sdk.dsearchCapabilities ?? null, strict };
   }
   if (!store) throw new DsearchError("COMPATIBILITY_FAILED");
+  if (role === "maintenance" && !["index_audit", "snapshot", "close"].includes(method)) throw new DsearchError("SCOPE_DENIED");
   const args = object(payload.args ?? {}), current = store;
   if (role === "reader" && ["update", "embed", "embed_step"].includes(method)) throw new DsearchError("SCOPE_DENIED");
   const stats = strict ? sdk.compatibilityStats() : {};
@@ -91,7 +92,8 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
       case "update": return current.update();
       case "embed_step": {
         if (!sdk.dsearchCapabilities?.boundedEmbedCalls || !semanticCollections.includes(string(args.collection))) throw new DsearchError("COMPATIBILITY_FAILED");
-        return current.embed({ collection: string(args.collection), maxDocsPerCall: 4, maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
+        const size=args.max_documents??4;if(!Number.isSafeInteger(size)||Number(size)<1||Number(size)>4)throw new DsearchError("INVALID_REQUEST");
+        return current.embed({ collection: string(args.collection), maxDocsPerCall: Number(size), maxDocsPerBatch: Number(size), maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
       }
       case "embed": {
         if (role === "probe") return current.embed({ maxDocsPerBatch: 4, maxBatchBytes: 2_097_152, chunkStrategy: "regex" });
@@ -233,7 +235,8 @@ process.on("message", message => {
     send({ version: 1, id, type: "response", ok: !controller.signal.aborted, code: "CANCELLED", value });
   }).catch(error => {
     const parsed = ErrorCode.safeParse(error?.code);
-    const code = controller.signal.aborted ? "CANCELLED" : parsed.success ? parsed.data : error?.name === "ZodError" ? "INVALID_REQUEST" : "MODEL_UNAVAILABLE";
+    const exhausted=error?.code==='ENOMEM'||/std::bad_alloc|cannot allocate memory|out of memory/i.test(String(error?.message??''));
+    const code = controller.signal.aborted ? "CANCELLED" : exhausted ? "RESOURCE_EXHAUSTED" : parsed.success ? parsed.data : error?.name === "ZodError" ? "INVALID_REQUEST" : "MODEL_UNAVAILABLE";
     send({ version: 1, id, type: "response", ok: false, code, reason: ErrorReason.safeParse(error?.reason).success ? error.reason : code === "RERANK_UNAVAILABLE" ? "RERANK_EXECUTION_FAILED" : undefined, telemetry: requestStats });
   }).finally(() => { active = undefined; });
 });

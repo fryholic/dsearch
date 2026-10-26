@@ -1054,3 +1054,6 @@ details[open] > summary::after { content:'⌃'; }
 .scope-rules > label { display: grid; gap: 8px; margin-top: 20px; min-width: 0; }
 .scope-rules > .hint { margin: 8px 0 0; }
 .scope-rules > .error-text { margin: 8px 0 0; }
+
+.backup-location { display: grid; gap: 8px; min-width: 0; }
+.backup-location > input { box-sizing: border-box; width: 100%; min-width: 0; font-weight: 400; }

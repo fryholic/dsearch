@@ -26,3 +26,5 @@ export async function createDiagnosticServer(status: () => unknown) {
   return { url: "http://" + authority, token,
     close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) };
 }
+
+export { restoreBackup, reconcileRestore, type RestoreReport } from './restore.js';

@@ -40,6 +40,8 @@ const artifact=await engineArtifact(engine);
 const manifest={schema_version:1,upstream_commit:source.commit,patch_digest:hash(patch),artifact_sha256:artifact.sha256,
  lock_sha256:await fileDigest(join(root,'vendor/qmd-lock.yaml')),node_exact:process.versions.node,node_llama_cpp:'3.20.0',files:artifact.files};
 await writeFile(join(engine,'dsearch-artifact.json'),JSON.stringify(manifest,null,2)+'\n');
+// The unpatched reference shares the base engine dependencies, not the recovery variant's install.
+if(!recovery){
 const reference=join(root,'.local/qmd-reference');
 if(!await access(join(reference,'package.json')).then(()=>true,()=>false)) {
  await mkdir(reference,{recursive:true});
@@ -62,6 +64,7 @@ await copyFile(join(root,'vendor/qmd-lock.yaml'),join(reference,'pnpm-lock.yaml'
 run(process.execPath,['scripts/build.mjs'],reference);
 const referenceArtifact=await engineArtifact(reference);
 await writeFile(join(reference,'dsearch-artifact.json'),JSON.stringify({upstream_commit:source.commit,artifact_sha256:referenceArtifact.sha256,files:referenceArtifact.files},null,2)+'\n');
-console.log(JSON.stringify({engine:source.commit,patch_digest:manifest.patch_digest,artifact_sha256:manifest.artifact_sha256,reference:'unpatched',status:'prepared'},null,2));
+}
+console.log(JSON.stringify({engine:source.commit,patch_digest:manifest.patch_digest,artifact_sha256:manifest.artifact_sha256,reference:recovery?undefined:'unpatched',status:'prepared'},null,2));
 
 if(!recovery)process.stdout.write(run(process.execPath,[import.meta.filename,"--recovery"]));

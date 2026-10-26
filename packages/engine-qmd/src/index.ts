@@ -8,7 +8,7 @@ export type EngineResponse<T> = { result: T; stats: Record<string, number | bool
 export type OpenEngine = {
   engineRoot: string; dbPath: string; collectionPath: string; modelRoot: string;
   embedRole: "embed" | "reference"; strict: boolean;
-  role?: "probe" | "builder" | "reader"; generationId?: string;
+  role?: "probe" | "builder" | "reader" | "maintenance"; generationId?: string;
   collections?: Record<string, { path: string; pattern: string }>;
   semanticCollections?: string[];
 };
@@ -30,7 +30,7 @@ export class QmdWorker {
     for (const [key, model] of [['embed', embed], ['rerank', rerank]] as const) {
       try { await verifyModel(join(options.modelRoot, model.filename), model);modelErrors[key] = null; }
       catch (error) {
-        if (options.role !== 'reader' && !(options.role === 'builder' && key === 'rerank')) throw error;
+        if (options.role !== 'reader' && options.role !== 'maintenance' && !(options.role === 'builder' && key === 'rerank')) throw error;
         modelErrors[key] = error instanceof DsearchError ? error.code : 'MODEL_UNAVAILABLE';
       }
     }

@@ -7,18 +7,20 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { StateStore, Catalog, canonicalJSON, digest } from '@dsearch/catalog';
-import { createAlphaProfile, atomicFile, reconcileInterruptedBuilds } from '@dsearch/generations';
+import { createAlphaProfile, atomicFile, reconcileInterruptedBuilds, BackupStore, GenerationGC, reconcileGC, maintenanceActive } from '@dsearch/generations';
 import { ReaderPool, SourceSearch, SearchSessions } from '@dsearch/search';
 import { API_VERSION, DsearchError, ErrorCode, CollectionRequest, ReadRequest, ProfileManifest, DocumentRef } from '@dsearch/contracts';
-import { CollectionInfo, CollectionPatch, ReconcileRequest, JobInfo, AppStatus, ReadResponse, ExportRequest, CoverageRequest, ModelAction, ActivateRequest, RollbackRequest, PrepareProfileRequest, retryableJobCode } from '@dsearch/contracts/control';
+import { CollectionInfo, CollectionPatch, ReconcileRequest, JobInfo, AppStatus, ReadResponse, ExportRequest, CoverageRequest, ModelAction, ActivateRequest, RollbackRequest, PrepareProfileRequest, GCPolicy, GCApply, MaintenanceResult, retryableJobCode } from '@dsearch/contracts/control';
 import { PreferenceStore, exportSearch, openRegisteredDocument } from './management.js';
 import { ManagedJobs } from './jobs.js';
 import { ModelManager } from './models.js';
 import { ProfileController } from './profiles.js';
+import { recoverActiveGeneration } from './recovery.js';
+import { reconcileRestore } from './restore.js';
 import { LocalAuth } from './auth.js';
 import { privateRoot, takeOwnership } from './owner.js';
 const workspace = fileURLToPath(new URL('../../../', import.meta.url));
-const statuses: Partial<Record<ErrorCode, number>> = { INVALID_REQUEST: 422, INVALID_QUERY: 422, UNSUPPORTED_LOCATOR: 422, UNAUTHORIZED: 401, SCOPE_DENIED: 403, NO_ACTIVE_GENERATION: 409, STALE_REVISION: 409, STALE_EPOCH: 409, RESULT_EXPIRED: 410, INPUT_TOO_LARGE: 413, MODEL_NOT_INSTALLED: 503, MODEL_UNAVAILABLE: 503, BUSY: 503, SERVICE_UNAVAILABLE: 503, CANCELLED: 409, NOT_FOUND: 404, SOURCE_PENDING: 409, SOURCE_TOO_LARGE: 413, SCOPE_INCOMPLETE: 409, RERANK_UNAVAILABLE: 503, INPUT_TOO_LONG: 422, INVALID_LOCATOR: 422 };
+const statuses: Partial<Record<ErrorCode, number>> = { INVALID_REQUEST: 422, INVALID_QUERY: 422, UNSUPPORTED_LOCATOR: 422, UNAUTHORIZED: 401, SCOPE_DENIED: 403, NO_ACTIVE_GENERATION: 409, STALE_REVISION: 409, STALE_EPOCH: 409, RESULT_EXPIRED: 410, INPUT_TOO_LARGE: 413, MODEL_NOT_INSTALLED: 503, MODEL_UNAVAILABLE: 503, RESOURCE_EXHAUSTED:503, BUSY: 503, SERVICE_UNAVAILABLE: 503, CANCELLED: 409, NOT_FOUND: 404, SOURCE_PENDING: 409, SOURCE_TOO_LARGE: 413, SCOPE_INCOMPLETE: 409, RERANK_UNAVAILABLE: 503, INPUT_TOO_LONG: 422, INVALID_LOCATOR: 422 };
 const envelope = (data: unknown, requestId: string) => ({ schema_version: API_VERSION, request_id: requestId, ok: true, data });
 function json(res: ServerResponse, status: number, value: unknown) { if (res.destroyed || res.writableEnded)
     return; res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); }
@@ -78,14 +80,18 @@ export type ApplicationOptions = {
     profile?: ProfileManifest;
     port?: number;
     now?: () => number;
+    maintenanceFault?: (phase:string)=>void|Promise<void>;
 };
 export async function createApplication(options: ApplicationOptions = {}) {
-    const root = await privateRoot(resolve(options.dataRoot ?? join(homedir(), 'Library/Application Support/dsearch'))), instance = randomUUID(), release = await takeOwnership(root, instance);
+    const requestedRoot=resolve(options.dataRoot ?? join(homedir(), 'Library/Application Support/dsearch'));await reconcileRestore(requestedRoot);
+    const root = await privateRoot(requestedRoot), instance = randomUUID(), release = await takeOwnership(root, instance);
     let state: StateStore | undefined, auth: LocalAuth | undefined, stopWorkers: (() => Promise<void>) | undefined, startupCleanup: (() => Promise<void>) | undefined;
     try {
         state = await StateStore.open(root);reconcileInterruptedBuilds(state);
         const catalog = new Catalog(state), engineRoot = options.engineRoot ?? join(workspace, '.local/qmd-recovery'), modelRoot = options.modelRoot ?? join(workspace, '.local/models');
+        const backups=new BackupStore(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{})}),collector=new GenerationGC(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{}),backupReferences:()=>backups.generationReferences()});await reconcileGC(catalog);await backups.reconcile();
         const knownProfiles = options.profile ? [ProfileManifest.parse(options.profile)] : (await Promise.all([createAlphaProfile(engineRoot), createAlphaProfile(engineRoot, 'reference')])).map(p => p.manifest);
+        const recovery=await recoverActiveGeneration(catalog,{engineRoot,modelRoot,profileFingerprints:new Set(knownProfiles.map(p=>digest(canonicalJSON(p))))});
         const models = await ModelManager.open(modelRoot), managed = new ManagedJobs(state), lane = new HeavyLane();
         let profiles: ProfileController;
         const readers = new ReaderPool(catalog, { engineRoot, modelRoot, acceptProfile: fp => fp === profiles.fingerprint });
@@ -102,6 +108,9 @@ export async function createApplication(options: ApplicationOptions = {}) {
             if (doc.present)
                 counts[doc.eligibility] = (counts[doc.eligibility] ?? 0) + 1; return CollectionInfo.parse({ collection_id: c.collection_id, name: c.name, root_path: c.root_path, enabled: !!c.enabled, preset: "general", policy_version: 2, legacy_compatibility: policy.metadata_mode === "legacy-v1", path_prefixes: policy.path_prefixes ?? [], metadata_filter: policy.metadata_filter ?? null, navigation_headings: policy.navigation_headings ?? [], migration: catalog.migrationInfo(id), include: policy.include, exclude: policy.exclude, scope_fp: c.scope_fp, coverage: counts, scope: catalog.scanStatus(id) }); };
         const jobInfo = (id: string) => managed.info(id);
+        const startBackup=()=>{
+          const accepted=managed.start('backup',async(signal,progress)=>{progress('backing-up');const info=await backups.create(signal);store.db.prepare('UPDATE jobs SET cursor_json=? WHERE job_id=?').run(canonicalJSON({result:{kind:'backup',backup:info}}),accepted.job_id);progress('complete',{bytes:info.bytes,generations:info.generations});});return accepted;
+        };
         const status = () => {
             const profile = profiles.profile, profileFp = profiles.fingerprint;
             const generation = store.db.prepare("SELECT a.generation_id,a.epoch,g.profile_fp,g.source_seq,g.coverage_json FROM active_slot a JOIN generations g ON g.generation_id=a.generation_id WHERE a.slot=1 AND g.state='active'").get();
@@ -110,7 +119,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 for (const doc of JSON.parse(String(generation.coverage_json)))
                     coverage[doc.state] = (coverage[doc.state] ?? 0) + 1;
             const profileState = store.db.prepare('SELECT status FROM profiles WHERE profile_id=?').get(profile.profile_id)?.status ?? 'draft';
-            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, busy: profiles.busy || managed.busy, scope_incomplete: catalog.listCollections().some(c => c.enabled && catalog.scanStatus(c.collection_id).status === 'incomplete'), needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, policy_upgrade_pending: catalog.policyUpgradePending, modes: { lexical: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, hybrid: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, deep: false, literal: true }, execution: { heavy_concurrency: 1, heavy_busy: lane.busy, queued_requests: lane.queued + sessions.queuedCount, resident_workers: readers.residentWorkers, idle_shutdown_seconds: 300 }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
+            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, recovery:recovery.state==='rebuild_required'&&generation?{state:'recovered',damaged_generation_id:recovery.damaged_generation_id,recovered_generation_id:generation.generation_id}:recovery, busy: profiles.busy || managed.busy || maintenanceActive(store), scope_incomplete: catalog.listCollections().some(c => c.enabled && catalog.scanStatus(c.collection_id).status === 'incomplete'), needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, policy_upgrade_pending: catalog.policyUpgradePending, modes: { lexical: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, hybrid: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, deep: false, literal: true }, execution: { heavy_concurrency: 1, heavy_busy: lane.busy, maintenance_busy:maintenanceActive(store), queued_requests: lane.queued + sessions.queuedCount, resident_workers: readers.residentWorkers, idle_shutdown_seconds: 300 }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
         };
         const requireOrigin = (req: IncomingMessage) => { if (req.headers.origin !== origin || (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin'))
             throw new DsearchError('SCOPE_DENIED'); };
@@ -149,6 +158,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 return;
             }
             const mode = authentication.authenticate(req, origin);
+            if(maintenanceActive(store)&&!['GET','HEAD'].includes(req.method??'')&&!['/v1/searches','/v1/related-searches','/v1/comparisons','/v1/literal-searches','/v1/documents/read','/v1/documents/info','/v1/documents/open','/v1/diagnostics','/v1/ui/code','/v1/shutdown'].includes(path)&&!(req.method==='DELETE'&&/^\/v1\/(jobs|searches)\/[A-Za-z0-9_-]+$/.test(path)))throw new DsearchError('BUSY');
             if (path === '/v1/ui/session' && req.method === 'GET') {
                 const session = authentication.cookieSession(req, origin);
                 json(res, 200, envelope({ csrf_token: session.csrf }, requestId));
@@ -168,7 +178,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
             if (path === '/v1/settings' && req.method === 'PUT') { json(res, 200, envelope(await preferences.set(await body(req)), requestId));return; }
             if (path === '/v1/diagnostics' && req.method === 'POST') {
                 const input = await body(req);if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) throw new DsearchError('INVALID_REQUEST');
-                const current = status();json(res, 200, envelope({ diagnostic_version: 1, created_at: new Date().toISOString(), runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, version: current.version, generation: current.generation, profile: current.profile, execution: current.execution, needs_rebuild: current.needs_rebuild, scope_incomplete: current.scope_incomplete, coverage: current.coverage, jobs: current.jobs.map(job => ({ state: job.state, phase: job.phase, error_code: job.error_code })), storage_policy: { queries: 'memory-only', results: 'memory-only', source_writes: false }, capabilities: { mcp: true, incremental_sync: true, backup_restore: false, deep: false } }, requestId));return;
+                const current = status();json(res, 200, envelope({ diagnostic_version: 1, created_at: new Date().toISOString(), runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, version: current.version, generation: current.generation, profile: current.profile, recovery:current.recovery, execution: current.execution, needs_rebuild: current.needs_rebuild, scope_incomplete: current.scope_incomplete, coverage: current.coverage, jobs: current.jobs.map(job => ({ state: job.state, phase: job.phase, error_code: job.error_code })), storage_policy: { queries: 'memory-only', results: 'memory-only', source_writes: false }, capabilities: { mcp: true, incremental_sync: true, backup_restore: true, deep: false } }, requestId));return;
             }
             if (path === '/v1/documents/open' && req.method === 'POST') {
                 const parsed = DocumentRef.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
@@ -179,6 +189,16 @@ export async function createApplication(options: ApplicationOptions = {}) {
             const coveragePath = /^\/v1\/collections\/([A-Za-z0-9_-]{1,128})\/coverage$/.exec(path);
             if (coveragePath && req.method === 'POST') { const parsed = CoverageRequest.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');const c = catalog.collection(coveragePath[1]!), docs = catalog.documents(c.collection_id).filter(d => d.present), { offset, limit } = parsed.data;json(res, 200, envelope({ collection_id: c.collection_id, total: docs.length, offset, has_more: offset + limit < docs.length, documents: docs.slice(offset, offset + limit).map(d => ({ doc_id: d.doc_id, relative_path: d.relative_path, eligibility: d.eligibility, reason: d.eligibility_reason, revision_id: d.latest_revision_id })), scope: catalog.scanStatus(c.collection_id) }, requestId));return; }
             if (path === '/v1/collections/preview' && req.method === 'POST') { json(res, 200, envelope(await catalog.preview(await body(req)), requestId));return; }
+            if(path==='/v1/backups'&&req.method==='GET'){if(maintenanceActive(store))throw new DsearchError('BUSY');json(res,200,envelope(await backups.list(),requestId));return;}
+            if(path==='/v1/backups'&&req.method==='POST'){if(!PrepareProfileRequest.safeParse(await body(req)).success)throw new DsearchError('INVALID_REQUEST');if(managed.busy||profiles.busy)throw new DsearchError('BUSY');json(res,202,envelope(startBackup(),requestId));return;}
+            if(path==='/v1/maintenance/gc/preview'&&req.method==='POST'){const parsed=GCPolicy.safeParse(await body(req));if(!parsed.success)throw new DsearchError('INVALID_REQUEST');if(maintenanceActive(store))throw new DsearchError('BUSY');json(res,200,envelope(await collector.preview(parsed.data),requestId));return;}
+            if(path==='/v1/maintenance/gc/apply'&&req.method==='POST'){
+             const parsed=GCApply.safeParse(await body(req));if(!parsed.success)throw new DsearchError('INVALID_REQUEST');if(managed.busy||profiles.busy)throw new DsearchError('BUSY');const {plan_id,...policy}=parsed.data;
+             const preview=await collector.preview(policy);if(preview.plan_id!==plan_id)throw new DsearchError('STALE_EPOCH');
+             const accepted=managed.start('generation-gc',async(signal,progress)=>{progress('collecting');const result=await collector.apply(plan_id,policy,signal);store.db.prepare('UPDATE jobs SET cursor_json=? WHERE job_id=?').run(canonicalJSON({result:{kind:'generation-gc',generation_ids:result.removed,bytes:result.bytes}}),accepted.job_id);progress('complete',{generations:result.removed.length,bytes:result.bytes});});json(res,202,envelope(accepted,requestId));return;
+            }
+            const jobResult=/^\/v1\/jobs\/([A-Za-z0-9_-]{1,128})\/result$/.exec(path);
+            if(jobResult&&req.method==='GET'){const row=store.db.prepare('SELECT state,cursor_json FROM jobs WHERE job_id=?').get(jobResult[1]!);if(!row)throw new DsearchError('NOT_FOUND');const result=JSON.parse(String(row.cursor_json)).result;if(!result)throw new DsearchError('SOURCE_PENDING');json(res,200,envelope(MaintenanceResult.parse(result),requestId));return;}
             if (path === '/v1/models' && req.method === 'GET') { json(res, 200, envelope(await models.list(), requestId));return; }
             if (path === '/v1/profiles' && req.method === 'GET') { json(res, 200, envelope(profiles.list(), requestId));return; }
             if (['/v1/models/check', '/v1/models/prepare'].includes(path) && req.method === 'POST') {
@@ -311,6 +331,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 const row = store.db.prepare('SELECT * FROM jobs WHERE job_id=?').get(retryJob[1]!);if (!row) throw new DsearchError('NOT_FOUND');
                 const cursor=JSON.parse(String(row.cursor_json));
                 if (!['failed','obsolete','cancelled'].includes(String(row.state)) || (!cursor.checkpoint && !retryableJobCode(row.error_code == null ? null : String(row.error_code)))) throw new DsearchError('INVALID_REQUEST');
+                if(row.kind==='backup'){json(res,202,envelope(startBackup(),requestId));return;}
                 if (['full-build','profile-build'].includes(String(row.kind))) {
                     const target = store.db.prepare('SELECT profile_id FROM generations WHERE generation_id=?').get(String(row.generation_id));if (!target) throw new DsearchError('NOT_FOUND');
                     const accepted = cursor.checkpoint ? profiles.resume(retryJob[1]!) : profiles.prepare(String(target.profile_id), row.kind === 'full-build');json(res, 202, envelope({ job_id: accepted.job_id, generation_id: accepted.generation_id, state: 'queued' }, requestId));return;

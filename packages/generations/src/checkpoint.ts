@@ -11,7 +11,7 @@ import type {SourceInput} from './reuse.js';
 export type BuildPlan={schema_version:1;generation_id:string;profile_fp:string;source_seq:number;expected_epoch:number;publish:boolean;engine:OpenEngine;inputs:SourceInput[];coverage:GenerationDocument[];mappings:IndexedPassage[];files:string[];reused_documents:number};
 type Entry={path:string;bytes:number;sha256:string};
 type Checkpoint={schema_version:1;generation_id:string;profile_fp:string;source_seq:number;expected_epoch:number;database:string;files:Entry[];completed:number};
-export type CheckpointCursor={checkpoint:string;sha256:string};
+export type CheckpointCursor={checkpoint:string;sha256:string;resource_retries?:number;max_documents?:number;failed_native_requests?:number;embedding_call_count_incomplete?:number};
 const cursorValid=(c:CheckpointCursor)=>!!c&&/^\.checkpoints\/[a-f0-9-]+\.json$/.test(c.checkpoint)&&/^[a-f0-9]{64}$/.test(c.sha256);
 async function entry(root:string,path:string):Promise<Entry>{
  const file=join(root,path);if(!within(root,file)||await realpath(file)!==file)throw new DsearchError('SCOPE_DENIED');
@@ -48,7 +48,9 @@ export class BuildCheckpoints{
   await worker.invoke('snapshot',{target:path},{signal});await chmod(path,0o600);const durable=await open(path,'r');try{await durable.sync();}finally{await durable.close();}
   const value:Checkpoint={schema_version:1,generation_id:this.plan.generation_id,profile_fp:this.plan.profile_fp,source_seq:this.plan.source_seq,expected_epoch:this.plan.expected_epoch,database,files:[...this.files,await entry(this.root,database)],completed};
   await atomicFile(join(this.root,checkpoint),canonicalJSON(value)+'\n');
-  const cursor={checkpoint,sha256:await fileDigest(join(this.root,checkpoint))};
+  const persisted=JSON.parse(String(this.state.db.prepare('SELECT cursor_json FROM jobs WHERE job_id=?').get(this.jobId)!.cursor_json));
+  const counters=Object.fromEntries(['resource_retries','max_documents','failed_native_requests','embedding_call_count_incomplete'].filter(key=>Number.isSafeInteger(persisted[key])&&persisted[key]>=0).map(key=>[key,persisted[key]]));
+  const cursor={...counters,checkpoint,sha256:await fileDigest(join(this.root,checkpoint))};
   this.state.db.prepare('UPDATE jobs SET cursor_json=?,updated_at=? WHERE job_id=?').run(canonicalJSON(cursor),new Date().toISOString(),this.jobId);
   // The state pointer is durable before obsolete snapshots are removed. An interrupted removal is harmless.
   const prior=this.previous;this.previous=cursor;
@@ -58,7 +60,7 @@ export class BuildCheckpoints{
 /** Only call after exclusive daemon ownership has established that its former owner is gone. */
 export function reconcileInterruptedBuilds(state:StateStore):void{
  state.transaction(()=>{
-  const now=new Date().toISOString();
+  const now=new Date().toISOString();state.db.prepare("UPDATE jobs SET lease_owner=NULL,lease_expires_at=NULL WHERE state NOT IN ('queued','running','retry_wait')").run();
   state.db.prepare("UPDATE generations SET state='invalid' WHERE state IN ('building','validating') AND generation_id NOT IN (SELECT generation_id FROM active_slot)").run();
   state.db.prepare("UPDATE jobs SET state='obsolete',phase='interrupted',error_code='WORKER_EXITED',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE kind IN ('full-build','profile-build') AND state IN ('queued','running','retry_wait')").run(now);
  });

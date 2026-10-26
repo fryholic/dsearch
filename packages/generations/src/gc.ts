@@ -6,7 +6,7 @@ import {DsearchError} from '@dsearch/contracts';
 import {atomicFile} from './seal.js';
 import {generationPins,claimGenerationDeletion,beginMaintenance} from './pins.js';
 type Policy={keep_retired:number;min_age_seconds:number};
-export type GCPreview={plan_id:string;policy:Policy;candidates:{generation_id:string;bytes:number;state:string}[];protected:{generation_id:string;reasons:string[]}[]};
+export type GCPreview={plan_id:string;policy:Policy;candidates:{generation_id:string;bytes:number;state:string;created_at:string;documents:number;passages:number}[];protected:{generation_id:string;reasons:string[]}[]};
 async function privateFolder(path:string){await mkdir(path,{recursive:true,mode:0o700});const info=await lstat(path);if(!info.isDirectory()||info.isSymbolicLink()||(info.mode&0o077)||await realpath(path)!==path)throw new DsearchError('SCOPE_DENIED');}
 async function syncDirectory(path:string){const handle=await open(path,'r');try{await handle.sync();}finally{await handle.close();}}
 async function moveDirectory(from:string,to:string){await rename(from,to);await syncDirectory(join(from,'..'));await syncDirectory(join(to,'..'));}
@@ -36,18 +36,19 @@ export class GenerationGC{
    if(Date.now()-Date.parse(String(row.created_at))<policy.min_age_seconds*1000)reasons.push('minimum_age');
    if(reasons.length){protectedRows.push({generation_id:id,reasons});continue;}
    const info=await lstat(String(row.directory_path)).catch((e:NodeJS.ErrnoException)=>{if(e.code!=='ENOENT')throw e;return undefined;});if(info&&(!info.isDirectory()||info.isSymbolicLink()))throw new DsearchError('SCOPE_DENIED');
-   candidates.push({generation_id:id,bytes:info?await treeBytes(String(row.directory_path)):0,state:String(row.state)});
+   const coverage=JSON.parse(String(row.coverage_json));candidates.push({generation_id:id,bytes:info?await treeBytes(String(row.directory_path)):0,state:String(row.state),created_at:String(row.created_at),documents:Array.isArray(coverage)?coverage.length:0,passages:Number(state.db.prepare('SELECT count(*) AS n FROM passages WHERE generation_id=?').get(id)!.n)});
   }
   const value={policy,candidates,protected:protectedRows};return {plan_id:digest(canonicalJSON({root:state.root,source_seq:state.sourceSeq,active:active??null,...value})),...value};
  }
- async apply(planId:string,policy:Policy):Promise<{removed:string[];bytes:number}>{
+ async apply(planId:string,policy:Policy,signal?:AbortSignal):Promise<{removed:string[];bytes:number}>{
+  if(signal?.aborted)throw new DsearchError('CANCELLED');
   const done=beginMaintenance(this.catalog.state);try {
   const preview=await this.preview(policy);if(preview.plan_id!==planId)throw new DsearchError('STALE_EPOCH');const state=this.catalog.state,removed:string[]=[];let bytes=0;
   await privateFolder(join(state.root,'.maintenance'));await privateFolder(join(state.root,'generations','.trash'));
-  for(const candidate of preview.candidates){const id=candidate.generation_id,release=claimGenerationDeletion(state,id),operation_id=randomUUID(),file=join(state.root,'.maintenance','gc-'+operation_id+'.json'),original=join(state.root,'generations',id),trash=join(state.root,'generations','.trash',operation_id);
+  for(const candidate of preview.candidates){if(signal?.aborted)throw new DsearchError('CANCELLED');const id=candidate.generation_id,release=claimGenerationDeletion(state,id),operation_id=randomUUID(),file=join(state.root,'.maintenance','gc-'+operation_id+'.json'),original=join(state.root,'generations',id),trash=join(state.root,'generations','.trash',operation_id);
    try{
     await atomicFile(file,canonicalJSON({generation_id:id,operation_id})+'\n');const exists=await lstat(original).catch((e:NodeJS.ErrnoException)=>{if(e.code!=='ENOENT')throw e;return undefined;});if(exists)await moveDirectory(original,trash);
-    await this.options.fault?.('gc-after-rename');
+    await this.options.fault?.('gc-after-rename');if(signal?.aborted)throw new DsearchError('CANCELLED');
     state.transaction(()=>{
      if(state.db.prepare('SELECT 1 FROM active_slot WHERE generation_id=?').get(id)||generationPins(state,id).length)throw new DsearchError('BUSY');
      state.db.prepare('DELETE FROM passages WHERE generation_id=?').run(id);state.db.prepare('DELETE FROM generation_documents WHERE generation_id=?').run(id);state.db.prepare("UPDATE jobs SET generation_id=NULL,cursor_json='{}' WHERE generation_id=?").run(id);state.db.prepare('DELETE FROM generations WHERE generation_id=?').run(id);

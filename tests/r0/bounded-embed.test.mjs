@@ -12,3 +12,14 @@ test('recovery SDK returns after at most four documents and resumes missing vect
  assert.deepEqual(counts,[4,4,3]);const empty=await worker.invoke('embed_step',{collection:'semantic'});assert.equal(empty.stats.embeddingCalls,0);assert.equal(empty.result.remainingDocs,0);const audit=(await worker.invoke('index_audit')).result;assert.ok(audit.documents.every(d=>d.vector_chunks===1));
  }finally{await worker.close();await rm(folder,{recursive:true,force:true});}
 });
+
+test('maintenance role audits and snapshots without installed weights and denies inference or indexing',async()=>{
+ await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/maintenance-role-')),docs=join(folder,'projection');await mkdir(docs);await writeFile(join(docs,'guide.md'),'# Guide\n\nRecord the owner before the project review.');
+ const options={engineRoot:join(root,'.local/qmd-recovery'),modelRoot:join(folder,'missing-models'),dbPath:join(folder,'qmd.sqlite'),collectionPath:docs,embedRole:'embed',strict:true,generationId:'maintenance-test',collections:{semantic:{path:docs,pattern:'**/*.md'}},semanticCollections:['semantic']},worker=new QmdWorker();
+ try{
+  await worker.open({...options,role:'maintenance'});
+  for(const method of ['update','embed','embed_step','embedding','rerank','search','device','inspect','inspect_rerank','query_tokens','clear_cache','cache_audit','lexical_matches'])await assert.rejects(worker.invoke(method),{code:'SCOPE_DENIED'},method);
+  const audit=await worker.invoke('index_audit');assert.equal(audit.result.integrity.quick_check,'ok');assert.deepEqual(audit.result.documents,[]);assert.equal(audit.stats.embeddingCalls,0);assert.equal(audit.stats.rerankingCalls,0);
+  const snapshot=join(folder,'snapshot.sqlite');await worker.invoke('snapshot',{target:snapshot});const {stat}=await import('node:fs/promises');assert.ok((await stat(snapshot)).size>0);
+ }finally{await worker.close();await rm(folder,{recursive:true,force:true});}
+});

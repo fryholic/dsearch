@@ -5,4 +5,4 @@ export { GenerationBuilder, type BuildHandle, type BuildResult, type GenerationD
 export { reconcileInterruptedBuilds, loadCheckpoint } from './checkpoint.js';
 export { pinGeneration, generationPins, claimGenerationDeletion, maintenanceActive, beginMaintenance } from './pins.js';
 export { GenerationGC, reconcileGC, type GCPreview } from './gc.js';
-export { BackupStore, readBackup, type BackupInfo, type BackupManifest } from './backups.js';
+export { BackupStore, readBackup, privateDirectory, durableFile, copyBackupFile, type BackupInfo, type BackupManifest } from './backups.js';

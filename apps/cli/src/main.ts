@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { writeFile } from 'node:fs/promises';
-import { Preferences, CollectionPatch } from '@dsearch/contracts/control';
+import { Preferences, CollectionPatch, GCPolicy } from '@dsearch/contracts/control';
 import { DsearchError, ErrorCode, ErrorReason, Identifier, MetadataFilter, CollectionRequest, SearchRequest, LiteralRequest, ReadRequest, RelatedRequest, CompareRequest } from '@dsearch/contracts';
 import { SearchStatus } from '@dsearch/contracts/search';
 import { connect, startDaemon, waitForStopped, openUI, defaultRoot, type Packet } from './connection.js';
@@ -28,7 +28,10 @@ Usage: pnpm dsearch <command> [options]
   profile list|prepare|build [profile-id] [--wait]
   profile activate <profile-id> --generation <generation-id> [--expected-epoch N]
   generation list|rollback [generation-id] [--wait]
-  jobs list|get|cancel|retry [id]
+  generation gc [--apply --plan-id SHA256] [--keep-retired 2] [--min-age-seconds 86400]
+  backup create|list [--no-wait]
+  restore <backup-folder> --target-root <path> [--apply --plan-id SHA256]
+  jobs list|get|cancel|retry|result [id]
   collection update <id> [--name <name>] [--include <glob>] [--exclude <glob>] [--scope-json <json>] [--no-legacy-metadata]
   collection coverage <id>
   settings get|set [--theme system|light|dark] [--mode lexical|hybrid] [--rerank|--no-rerank]
@@ -87,16 +90,22 @@ function print(packet: Packet) {
         process.stderr.write('Partial literal results: ' + d.stop_reason + '\n');
 }
 try {
-    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, 'scope-json': { type: 'string' }, 'no-legacy-metadata': { type: 'boolean' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, full: { type: 'boolean' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
+    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, 'scope-json': { type: 'string' }, 'no-legacy-metadata': { type: 'boolean' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, full: { type: 'boolean' }, apply: { type: 'boolean' }, 'target-root': { type: 'string' }, 'plan-id': { type: 'string' }, 'keep-retired': { type: 'string' }, 'min-age-seconds': { type: 'string' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
     jsonOutput = !!v.json;
     if (v.help || !p.length) {
         process.stdout.write(help);
         process.exit(0);
     }
     const root = resolve(v['data-root'] ?? defaultRoot()), command = p[0];
-    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp', 'jobs', 'settings', 'doctor', 'export', 'open', 'model', 'profile', 'generation'].includes(command!))
+    if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp', 'jobs', 'settings', 'doctor', 'export', 'open', 'model', 'profile', 'generation', 'backup', 'restore'].includes(command!))
         throw new DsearchError('INVALID_REQUEST');
     if (v.full && !['reconcile','sync'].includes(command!)) throw new DsearchError('INVALID_REQUEST');
+    if(v.apply&&command!=='restore'&&!(command==='generation'&&p[1]==='gc'))throw new DsearchError('INVALID_REQUEST');
+    if(command==='restore'){
+      if(p.length!==2||!v['target-root']||v['data-root']||v['no-wait']||(v.apply&&!/^[a-f0-9]{64}$/.test(v['plan-id']??''))||(!v.apply&&v['plan-id']))throw new DsearchError('INVALID_REQUEST');
+      const {restoreBackup}=await import('@dsearch/app-daemon'),data=await restoreBackup({backupPath:resolve(p[1]!),targetRoot:resolve(v['target-root']),apply:!!v.apply,...(v['plan-id']?{planId:v['plan-id']}:{})});
+      print({schema_version:1,request_id:randomUUID(),ok:true,data});await new Promise<void>(done=>process.stdout.write('',()=>done()));process.exit(0);
+    }
     if (command === 'mcp') {
         if (p.length !== 1 || v.json || v.stdin) throw new DsearchError('INVALID_REQUEST');
         const { startMcp } = await import('@dsearch/app-mcp');await startMcp(root, !!v['no-start']);
@@ -162,8 +171,17 @@ try {
             throw new DsearchError('INVALID_REQUEST');
         packet = await call('GET', '/v1/status');
     }
+    else if(command==='backup'){
+      if(p.length!==2||!['create','list'].includes(p[1]!))throw new DsearchError('INVALID_REQUEST');packet=await call(p[1]==='list'?'GET':'POST','/v1/backups',p[1]==='list'?undefined:{});
+      if(p[1]==='create'&&!v['no-wait']){packet=await wait('/v1/jobs/'+packet.data.job_id,true);packet=await call('GET','/v1/jobs/'+packet.data.job_id+'/result');packet={...packet,data:packet.data.backup};}
+    }
     else if (command === 'model' || command === 'profile' || command === 'generation') {
-        if (p[1] === 'list' && p.length === 2) { packet = await call('GET', command === 'model' ? '/v1/models' : '/v1/profiles');if (command === 'generation') packet = { ...packet, data: packet.data.generations }; }
+        if(command==='generation'&&p[1]==='gc'&&p.length===2){
+          const policy=GCPolicy.parse({...(v['keep-retired']!==undefined?{keep_retired:Number(v['keep-retired'])}:{}),...(v['min-age-seconds']!==undefined?{min_age_seconds:Number(v['min-age-seconds'])}:{})});
+          if(v.apply&&!/^[a-f0-9]{64}$/.test(v['plan-id']??''))throw new DsearchError('INVALID_REQUEST');packet=await call('POST','/v1/maintenance/gc/'+(v.apply?'apply':'preview'),{...policy,...(v.apply?{plan_id:v['plan-id']}:{})});
+          if(v.apply&&!v['no-wait']){packet=await wait('/v1/jobs/'+packet.data.job_id,true);packet=await call('GET','/v1/jobs/'+packet.data.job_id+'/result');}
+        }
+        else if (p[1] === 'list' && p.length === 2) { packet = await call('GET', command === 'model' ? '/v1/models' : '/v1/profiles');if (command === 'generation') packet = { ...packet, data: packet.data.generations }; }
         else if (command === 'model' && ['check', 'prepare'].includes(p[1] ?? '') && p.length === 3 && Identifier.safeParse(p[2]).success) { packet = await call('POST', '/v1/models/' + p[1], { profile_id: p[2] });if (!v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true); }
         else if (command === 'profile' && ['prepare', 'build'].includes(p[1] ?? '') && p.length === 3 && Identifier.safeParse(p[2]).success) { packet = await call('POST', '/v1/profiles/' + p[2] + '/' + p[1], {});if (!v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true); }
         else if (((command === 'profile' && p[1] === 'activate' && v.generation) || (command === 'generation' && p[1] === 'rollback')) && p.length === 3 && Identifier.safeParse(p[2]).success) {
@@ -190,7 +208,7 @@ try {
     }
     else if (command === 'jobs') {
         if (p[1] === 'list' && p.length === 2) { const current = await call('GET', '/v1/status');packet = { ...current, data: current.data.jobs }; }
-        else if (['get', 'cancel', 'retry'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) { packet = await call(p[1] === 'retry' ? 'POST' : p[1] === 'cancel' ? 'DELETE' : 'GET', '/v1/jobs/' + p[2] + (p[1] === 'retry' ? '/retry' : ''), ...(p[1] === 'retry' ? [{}] : []));if (p[1] === 'retry' && !v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true); }
+        else if (['get', 'cancel', 'retry', 'result'].includes(p[1] ?? '') && p.length === 3 && /^[A-Za-z0-9_-]{1,128}$/.test(p[2]!)) { packet = await call(p[1] === 'retry' ? 'POST' : p[1] === 'cancel' ? 'DELETE' : 'GET', '/v1/jobs/' + p[2] + (p[1] === 'retry' ? '/retry' : p[1] === 'result' ? '/result' : ''), ...(p[1] === 'retry' ? [{}] : []));if (p[1] === 'retry' && !v['no-wait']) packet = await wait('/v1/jobs/' + packet.data.job_id, true); }
         else throw new DsearchError('INVALID_REQUEST');
     }
     else if (command === 'collection') {
