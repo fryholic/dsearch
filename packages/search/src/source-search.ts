@@ -5,6 +5,7 @@ import { Catalog, canonicalJSON, digest, type Collection } from '@dsearch/catalo
 import { DsearchError, SearchRequest, type RelatedRequest, type CompareRequest, type LiteralRequest } from '@dsearch/contracts';
 import { KeywordComplete, LiteralComplete, CompareComplete, type SearchDocument } from '@dsearch/contracts/search';
 import { primaryIntersections, validateSourceMap, sourcePoint, type Passage, type SourceSpan } from '@dsearch/compiler';
+import type { CandidateReceipt } from '@dsearch/engine-qmd';
 import type { Progress } from '@dsearch/runtime';
 import type { ReadLease } from './readers.js';
 const label = (value: string, cap = 512): string => { if (value.length <= cap)
@@ -24,8 +25,20 @@ export function excerptRange(text: string, primary: SourceSpan, match: SourceSpa
     return { start, end };
 }
 export const quotedKeywords = (query: string): string => query.replace(/\s+/g, ' ').trim().split(' ').map(term => '"' + term.replaceAll('"', ' ') + '"').join(' ');
+/** An opt-in in-process evaluation sink; never included in public search results or persisted. */
+export type CandidateSnapshot = {
+    search_id: string;
+    generation_id: string;
+    epoch: number;
+    profile_fp: string;
+    requested_mode: SearchRequest['mode'];
+    effective_mode: SearchRequest['mode'];
+    stage: CandidateReceipt['stage'];
+    budget: number;
+    candidates: { doc_id: string; revision_id: string; passage_id: string; rank: number; score: number }[];
+};
 export class SourceSearch {
-    constructor(readonly catalog: Catalog) { }
+    constructor(readonly catalog: Catalog, readonly options: { onCandidates?: (receipt: CandidateSnapshot) => void } = {}) { }
     validateCollections(ids: string[]): Collection[] { return ids.map(id => { let collection; try {
         collection = this.catalog.collection(id);
     }
@@ -42,8 +55,20 @@ export class SourceSearch {
         const internal = request.mode === 'lexical' ? [...names('s_'), ...names('l_')] : names('s_'), query = quotedKeywords(request.query);
         const started = performance.now();
         type Hit = { file: string; score: number };
-        type EngineResult = { hits: Hit[]; effective_mode: SearchRequest['mode']; rank_stage: KeywordComplete['rank_stage']; degraded: boolean; warnings?: string[] };
-        const engine = await lease.run<EngineResult>('search', { ...request, query: request.query, lexical_query: query, collections: internal, limit: request.candidate_limit }, { signal, onProgress });
+        type EngineResult = { hits: Hit[]; effective_mode: SearchRequest['mode']; rank_stage: KeywordComplete['rank_stage']; degraded: boolean; warnings?: string[]; candidate_receipt?: CandidateReceipt };
+        const engine = await lease.run<EngineResult>(this.options.onCandidates ? 'search_receipt' : 'search', { ...request, query: request.query, lexical_query: query, collections: internal, limit: request.candidate_limit }, { signal, onProgress });
+        if (this.options.onCandidates) {
+            const receipt = engine.result.candidate_receipt;
+            const stage = engine.result.effective_mode === 'lexical' ? 'bm25' : 'rrf_before_chunk_selection';
+            if (!receipt || receipt.stage !== stage || receipt.candidates.length > request.candidate_limit || receipt.candidates.length !== Number(engine.stats.actualCandidates) || new Set(receipt.candidates.map(c => c.file)).size !== receipt.candidates.length)
+                throw new DsearchError('COMPATIBILITY_FAILED');
+            const candidates = receipt.candidates.map((candidate, index) => {
+                const passage = reader.mappings.get(candidate.file.replace(/^qmd:\/\//, ''));
+                if (!passage || candidate.rank !== index + 1 || !Number.isFinite(candidate.score)) throw new DsearchError('SOURCE_MAP_MISMATCH');
+                return { doc_id: passage.doc_id, revision_id: passage.revision_id, passage_id: passage.passage_id, rank: candidate.rank, score: candidate.score };
+            });
+            this.options.onCandidates({ search_id: searchId, generation_id: lease.snapshot.generation_id, epoch: lease.snapshot.epoch, profile_fp: lease.snapshot.profile_fp, requested_mode: request.mode, effective_mode: engine.result.effective_mode, stage: receipt.stage, budget: request.candidate_limit, candidates });
+        }
         const hits = engine.result.hits;
         const supplemental = request.mode !== 'lexical' ? await lease.run<EngineResult>('search', { ...request, query, mode: 'lexical', rerank: false, collections: names('l_'), limit: Math.min(80, request.candidate_limit) }, { signal, onProgress }) : undefined;
         const candidates = [...hits.map(hit => ({ hit, supplemental: false })), ...(supplemental?.result.hits ?? []).map(hit => ({ hit, supplemental: true }))].map(value => {

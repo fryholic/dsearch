@@ -16,5 +16,10 @@
     "patchFile": "recovery-v1.patch",
     "patchSha256": "128eb41324b22560164f41df2345fc18cf6e88087b296b46bf749d2e15ce8bc4",
     "engineArtifactSha256": "c41ff2a2b105352723fc8fb157c4f29c34bd1cee4bb0021e24130a3ff4cfb94c"
+  },
+  "audited": {
+    "patchFile": "audited-v1.patch",
+    "patchSha256": "13250bfae4a4d69dec66e53c69622a3c8af0e799ddb9da892d4df31aed0b5edc",
+    "engineArtifactSha256": "c33b800d0aafbfdb8d6856ce21eebd0e816e9504dc1e01500a846761787af1ce"
   }
 }

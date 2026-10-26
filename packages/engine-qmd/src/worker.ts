@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { EngineSearchRequest, DsearchError, ErrorCode, ErrorReason, type Filter } from "@dsearch/contracts";
+import type { CandidateReceipt } from './index.js';
 
 type Stats = Record<string, number | boolean>;
 type Hit = { file: string; title: string; body?: string; bestChunk?: string; bestChunkPos?: number; score: number; [key: string]: unknown };
@@ -163,12 +164,17 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
       }
       case "snapshot": await current.dsearchSnapshot(string(args.target)); return { complete: true };
       case "close": await current.close(); store = undefined; return { closed: true };
-      case "search": {
+      case "search":
+      case "search_receipt": {
+        const capture = method === 'search_receipt';
+        if (capture && (!strict || sdk.dsearchCapabilities?.candidateReceipt !== true)) throw new DsearchError('COMPATIBILITY_FAILED');
+        let receipt: CandidateReceipt | undefined;
         const request = EngineSearchRequest.parse(args);
         if (request.collections.some(id => !allowedCollections.includes(id))) throw new DsearchError("SCOPE_DENIED");
         const filter = request.filter ? compileFilter(request.filter) : undefined;
         const line = request.query.replace(/\s+/g, " "), lexical = request.lexical_query ?? line;
         const search = async (mode: string, rerank: boolean) => {
+          receipt = undefined;
           // Expansion is absent from this validated profile. Never invoke an implicit downloader.
           if (mode === 'deep') throw new DsearchError('MODEL_NOT_INSTALLED', undefined, false, 'EXPANSION_MODEL_NOT_INSTALLED');
           if (mode !== 'lexical' && modelErrors.embed) throw new DsearchError(modelErrors.embed === 'MODEL_NOT_INSTALLED' ? 'MODEL_NOT_INSTALLED' : 'MODEL_UNAVAILABLE', undefined, false, modelErrors.embed === 'MODEL_NOT_INSTALLED' ? 'EMBED_MODEL_NOT_INSTALLED' : 'EMBED_MODEL_UNAVAILABLE');
@@ -177,8 +183,10 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
           ? await current.searchLex(lexical, { collection: request.collections, limit: request.limit, filter })
           : await current.search({ ...(mode === "deep" ? { query: line } : { queries: [{ type: "lex", query: lexical }, { type: "vec", query: line }] }),
             collections: request.collections, filter, rerank, candidateLimit: request.candidate_limit, limit: request.limit, minScore: 0,
-            explain: true, chunkStrategy: "regex" });
+            explain: true, chunkStrategy: "regex",...(capture?{onCandidates:(candidates:{file:string;rank:number;score:number}[])=>{if(!Array.isArray(candidates)||candidates.length>request.candidate_limit||candidates.some((value,index)=>typeof value.file!=='string'||value.file.length>1024||value.rank!==index+1||!Number.isFinite(value.score)))throw new DsearchError('COMPATIBILITY_FAILED');receipt={stage:'rrf_before_chunk_selection',candidates:candidates.map(c=>({...c}))};}}:{}) });
           if (strict && mode === "lexical") stats.actualCandidates = values.length;
+          if(capture&&mode==='lexical')receipt={stage:'bm25',candidates:values.map((value,index)=>({file:value.file??String(value.filepath),rank:index+1,score:value.score}))};
+          if(capture&&(!receipt||receipt.candidates.length!==Number(stats.actualCandidates)))throw new DsearchError('COMPATIBILITY_FAILED');
           const explains = values.map(v => v.explain as { rrf?: { contributions?: { source: string }[] } } | undefined);
           stats.lexicalContributors = mode === 'lexical' ? values.length : explains.filter(e => e?.rrf?.contributions?.some(c => c.source === 'fts')).length;
           stats.vectorContributors = mode === 'lexical' ? 0 : explains.filter(e => e?.rrf?.contributions?.some(c => c.source === 'vec')).length;
@@ -196,7 +204,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
           stats.rerankSucceeded = false;
           try {
             const hits = await search(mode, rerank);
-            return { hits, requested_mode: request.mode, effective_mode: mode, rank_stage: mode === 'lexical' ? 'bm25' : stats.rerankSucceeded ? 'qmd_reranked_blend' : 'qmd_rrf', degraded: warnings.length > 0, warnings };
+            return { hits, requested_mode: request.mode, effective_mode: mode, rank_stage: mode === 'lexical' ? 'bm25' : stats.rerankSucceeded ? 'qmd_reranked_blend' : 'qmd_rrf', degraded: warnings.length > 0, warnings,...(capture?{candidate_receipt:receipt}:{}) };
           } catch (error) {
             if (!request.allow_degraded || mode === 'lexical' || signal.aborted) throw error;
             const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';

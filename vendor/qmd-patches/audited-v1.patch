@@ -1,0 +1,769 @@
+diff --git a/src/db.ts b/src/db.ts
+index de23218..f09770c 100644
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -16,7 +16,7 @@ export const isBun = "Bun" in globalThis;
+ export type SQLiteValue = string | number | bigint | Buffer | Uint8Array | Float32Array | null;
+ export type SQLiteParams = readonly SQLiteValue[];
+ 
+-type DatabaseConstructor = new (path: string) => Database;
++type DatabaseConstructor = new (path: string, options?: { readonly: boolean; fileMustExist: boolean }) => Database;
+ type LoadableSqliteDatabase = Pick<Database, "loadExtension">;
+ 
+ let _Database: DatabaseConstructor;
+@@ -113,8 +113,10 @@ function enableWal(db: Database, budgetMs: number): void {
+  * restores the upstream fail-fast behaviour). See
+  * https://bun.sh/docs/api/sqlite#busy-timeout.
+  */
+-export function openDatabase(path: string): Database {
+-  const db = new _Database(path) as Database;
++export function openDatabase(path: string, readOnly = false): Database {
++  if (readOnly && isBun) throw new Error("dsearch sealed-reader mode requires the pinned Node runtime");
++  const db = new _Database(path, readOnly ? { readonly: true, fileMustExist: true } : undefined) as Database;
++  if (readOnly) { db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=5000"); return db; }
+   const raw = process.env.QMD_SQLITE_BUSY_TIMEOUT;
+   const parsed = raw !== undefined && raw !== "" ? Number(raw) : Number.NaN;
+   const busyTimeoutMs = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 120_000;
+diff --git a/src/dsearch-compat.ts b/src/dsearch-compat.ts
+new file mode 100644
+index 0000000..a6f41cd
+--- /dev/null
++++ b/src/dsearch-compat.ts
+@@ -0,0 +1,66 @@
++/** dsearch compatibility boundary, pinned to the upstream and runtime in the release manifest. */
++import { AsyncLocalStorage } from "node:async_hooks";
++import { setImmediate } from "node:timers/promises";
++
++export class CompatibilityError extends Error {
++  constructor(public readonly code: string) { super(code); this.name = "CompatibilityError"; }
++}
++export class MemoryQueryCache {
++  private entries = new Map<string, { value: string; expires: number }>();
++  constructor(private readonly ttlMs = 300_000, private readonly maxEntries = 512) {}
++  get(key: string): string | null {
++    const hit = this.entries.get(key);
++    if (!hit || hit.expires <= Date.now()) { this.entries.delete(key); return null; }
++    return hit.value;
++  }
++  set(key: string, value: string): void {
++    if (this.entries.size >= this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
++    this.entries.set(key, { value, expires: Date.now() + this.ttlMs });
++  }
++  delete(key: string): void { this.entries.delete(key); }
++  clear(): void { this.entries.clear(); }
++}
++export type CompatibilityStats = {
++  embeddingCalls: number; rerankingCalls: number; expansionCalls: number; actualCandidates: number;
++  memoryCacheReads: number; memoryCacheWrites: number; truncatedInputs: number;
++  rerankAttempted: boolean; rerankSucceeded: boolean;
++  fallbackUsed: boolean; embeddingTokensMax: number; rerankTokensMax: number;
++};
++export type CompatibilityRequest = {
++  signal?: AbortSignal; cache: MemoryQueryCache;
++  onProgress?: (event: { phase: string; completed: number }) => void;
++  stats: CompatibilityStats;
++};
++const requests = new AsyncLocalStorage<CompatibilityRequest>();
++export function currentCompatibility(): CompatibilityRequest | undefined { return requests.getStore(); }
++export function compatibilityStats(): CompatibilityStats {
++  return { embeddingCalls: 0, rerankingCalls: 0, expansionCalls: 0, actualCandidates: 0, memoryCacheReads: 0,
++    memoryCacheWrites: 0, truncatedInputs: 0, rerankAttempted: false, rerankSucceeded: false, fallbackUsed: false, embeddingTokensMax: 0, rerankTokensMax: 0 };
++}
++export function runDsearchRequest<T>(request: CompatibilityRequest, operation: () => Promise<T>): Promise<T> {
++  return requests.run(request, operation);
++}
++export function compatibilityCheck(): void {
++  if (currentCompatibility()?.signal?.aborted) throw new CompatibilityError("CANCELLED");
++}
++export async function compatibilityYield(phase: string, completed = 0): Promise<void> {
++  if (!currentCompatibility()) return;
++  await setImmediate();
++  compatibilityCheck();
++  currentCompatibility()?.onProgress?.({ phase, completed });
++}
++export function compatibilityTokens(count: number, kind: "document" | "query" | "rerank"): void {
++  const request = currentCompatibility(); if (!request) return;
++  const limit = kind === "query" ? 512 : kind === "document" ? 800 : 4096;
++  if (kind === "rerank") request.stats.rerankTokensMax = Math.max(request.stats.rerankTokensMax, count);
++  else request.stats.embeddingTokensMax = Math.max(request.stats.embeddingTokensMax, count);
++  if (count > limit) throw new CompatibilityError("INPUT_TOO_LONG");
++}
++export const dsearchCapabilities = Object.freeze({
++  version: 1, "EP-01": true, "EP-02": true, "EP-03": true, "EP-04": true,
++  runtime: "node-llama-cpp@3.20.0", cacheMode: "memory", strictNoTruncation: true,
++  sealedReadOnly: true,
++  boundedEmbedCalls: true,
++  candidateReceipt: true,
++  lexicalEvidence: true,
++});
+diff --git a/src/index.ts b/src/index.ts
+index 76bc2a6..341aee5 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,3 +1,5 @@
++export { runDsearchRequest, MemoryQueryCache, compatibilityStats, dsearchCapabilities } from "./dsearch-compat.js";
++import { createHash } from "node:crypto";
+ /**
+  * QMD SDK - Library mode for programmatic access to QMD search and indexing.
+  *
+@@ -18,6 +20,8 @@
+  */
+ 
+ import {
++  dsearchInspectProjection,
++  dsearchLexicalMatches,
+   createStore as createStoreInternal,
+   hybridQuery,
+   structuredSearch,
+@@ -68,6 +72,8 @@ import {
+ } from "./store.js";
+ import {
+   LlamaCpp,
++  formatDocForEmbedding,
++  formatQueryForEmbedding,
+ } from "./llm.js";
+ import type {
+   DocumentMetadata,
+@@ -218,6 +224,8 @@ export type UpdateResult = {
+  * Options for the unified search() method.
+  */
+ export interface SearchOptions {
++  /** Metadata-only receipt of the actual pre-rerank RRF pool. */
++  onCandidates?: (candidates: readonly {file:string;rank:number;score:number}[]) => void;
+   /** Simple query string — will be auto-expanded via LLM */
+   query?: string;
+   /** Pre-expanded queries (from expandQuery) — skips auto-expansion */
+@@ -291,6 +299,8 @@ export interface StoreOptions {
+   configPath?: string;
+   /** Inline collection config (mutually exclusive with `configPath`) */
+   config?: CollectionConfig;
++  /** dsearch compatibility option: sealed Node reader; no migrations or config writes. */
++  dsearchReadOnly?: boolean;
+ }
+ 
+ /**
+@@ -305,6 +315,15 @@ export interface QMDStore {
+   readonly internal: InternalStore;
+   /** Path to the SQLite database */
+   readonly dbPath: string;
++  dsearchInspectProjection(text: string, title: string, file: string): Promise<{ embeddingTokens: number; embeddingChunks: number; searchChunks: number; safe: boolean }>;
++  dsearchQueryTokens(query: string): Promise<number>;
++  dsearchInspectRerank(query: string, text: string): Promise<{ tokens: number; limit: number }>;
++  dsearchEmbedding(text: string, title: string, isQuery: boolean): Promise<{ dimension: number; norm: number }>;
++  dsearchRerank(query: string, documents: { file: string; text: string }[]): Promise<{ file: string; score: number }[]>;
++  dsearchDevice(): ReturnType<LlamaCpp["getDeviceInfo"]>;
++  dsearchSnapshot(target: string): Promise<void>;
++  dsearchLexicalMatches(query: string, files: { file: string; primaryRanges: { start: number; end: number }[] }[]): Promise<{ file: string; projectionSha256: string; ranges: { start: number; end: number }[] }[]>;
++
+ 
+   // ── Search ──────────────────────────────────────────────────────────
+ 
+@@ -396,6 +415,7 @@ export interface QMDStore {
+     /** Restrict embedding to documents in one collection. */
+     collection?: string;
+     maxDocsPerBatch?: number;
++    maxDocsPerCall?: number;
+     maxBatchBytes?: number;
+     chunkStrategy?: ChunkStrategy;
+     onProgress?: (info: EmbedProgress) => void;
+@@ -449,7 +469,8 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+   }
+ 
+   // Create the internal store (opens DB, creates tables)
+-  const internal = createStoreInternal(options.dbPath);
++  if (options.dsearchReadOnly && options.configPath) throw new Error("Sealed readers require inline verified config");
++  const internal = createStoreInternal(options.dbPath, { readOnly: options.dsearchReadOnly === true });
+   const db = internal.db;
+ 
+   // Track whether we have a YAML config path for write-through
+@@ -466,7 +487,11 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+     // Inline config mode: inject config source for mutations, sync to DB
+     setConfigSource({ config: options.config });
+     config = options.config;
+-    syncConfigToDb(db, config);
++    if (options.dsearchReadOnly) {
++      const expected = createHash("sha256").update(JSON.stringify(config)).digest("hex");
++      const saved = db.prepare("SELECT value FROM store_config WHERE key='config_hash'").get() as { value: string } | undefined;
++      if (saved?.value !== expected) { db.close(); throw new Error("Sealed reader config differs from generation"); }
++    } else syncConfigToDb(db, config);
+   }
+   // else: DB-only mode — no external config, use existing store_collections
+ 
+@@ -484,6 +509,20 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+   const store: QMDStore = {
+     internal,
+     dbPath: internal.dbPath,
++    dsearchInspectProjection: (text, title, file) => dsearchInspectProjection(internal, text, title, file),
++    dsearchQueryTokens: query => llm.countTokens(formatQueryForEmbedding(query, llm.embedModelName)),
++    dsearchInspectRerank: (query, text) => llm.dsearchInspectRerank(query, text),
++    dsearchEmbedding: async (text, title, isQuery) => {
++      const formatted = isQuery ? formatQueryForEmbedding(text, llm.embedModelName) : formatDocForEmbedding(text, title, llm.embedModelName);
++      const result = await llm.embed(formatted, { isQuery });
++      if (!result) throw new Error("MODEL_UNAVAILABLE");
++      return { dimension: result.embedding.length, norm: Math.sqrt(result.embedding.reduce((sum, n) => sum + n * n, 0)) };
++    },
++    dsearchRerank: (query, documents) => internal.rerank(query, documents),
++    dsearchDevice: () => llm.getDeviceInfo({ allowBuild: false }),
++    dsearchSnapshot: async target => { await (internal.db as unknown as { backup(path: string): Promise<unknown> }).backup(target); },
++    dsearchLexicalMatches: (query, files) => dsearchLexicalMatches(internal, query, files),
++
+ 
+     // Search
+     search: async (opts) => {
+@@ -513,6 +552,7 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+           candidateLimit: opts.candidateLimit,
+           skipRerank,
+           chunkStrategy: opts.chunkStrategy,
++          hooks: opts.onCandidates ? {onCandidates:opts.onCandidates} : undefined,
+         });
+       }
+ 
+@@ -527,6 +567,7 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+         candidateLimit: opts.candidateLimit,
+         skipRerank,
+         chunkStrategy: opts.chunkStrategy,
++        hooks: opts.onCandidates ? {onCandidates:opts.onCandidates} : undefined,
+       });
+     },
+     searchLex: async (q, opts) => {
+@@ -655,6 +696,7 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
+         model: embedOpts?.model,
+         collection: embedOpts?.collection,
+         maxDocsPerBatch: embedOpts?.maxDocsPerBatch,
++        maxDocsPerCall: embedOpts?.maxDocsPerCall,
+         maxBatchBytes: embedOpts?.maxBatchBytes,
+         chunkStrategy: embedOpts?.chunkStrategy,
+         onProgress: embedOpts?.onProgress,
+diff --git a/src/llm.ts b/src/llm.ts
+index 2b943a5..15c4812 100644
+--- a/src/llm.ts
++++ b/src/llm.ts
+@@ -1,3 +1,4 @@
++import { currentCompatibility, compatibilityCheck, compatibilityYield, compatibilityTokens, CompatibilityError } from "./dsearch-compat.js";
+ /**
+  * llm.ts - LLM abstraction layer for QMD using node-llama-cpp
+  *
+@@ -997,6 +998,7 @@ export class LlamaCpp implements LLM {
+    * Initialize the llama instance (lazy)
+    */
+   private async ensureLlama(allowBuild = true): Promise<Llama> {
++    if (currentCompatibility()) allowBuild = false;
+     if (this.llama) {
+       return this.llama;
+     }
+@@ -1111,9 +1113,10 @@ export class LlamaCpp implements LLM {
+     return isCpuModeRequested();
+   }
+ 
+-  private modelLoadOptions(modelPath: string): { modelPath: string; gpuLayers?: number } {
++  private modelLoadOptions(modelPath: string): { modelPath: string; gpuLayers?: number; loadSignal?: AbortSignal } {
+     return {
+       modelPath,
++      ...(currentCompatibility()?.signal ? { loadSignal: currentCompatibility()!.signal } : {}),
+       ...(this.isCpuOffloadForced() ? { gpuLayers: 0 } : {}),
+     };
+   }
+@@ -1124,6 +1127,12 @@ export class LlamaCpp implements LLM {
+    * from a proxy or firewall).
+    */
+   private async resolveModel(modelUri: string): Promise<string> {
++    if (currentCompatibility()) {
++      compatibilityCheck();
++      if (!modelUri.startsWith("/") || !existsSync(modelUri) || !statSync(modelUri).isFile()) throw new CompatibilityError("MODEL_NOT_INSTALLED");
++      validateGgufFile(modelUri, modelUri);
++      return modelUri;
++    }
+     this.ensureModelCacheDir();
+     // resolveModelFile handles HF URIs and downloads to the cache dir
+     const { resolveModelFile } = await loadNodeLlamaCpp();
+@@ -1171,6 +1180,7 @@ export class LlamaCpp implements LLM {
+    *      half the math cores, with at least 4 threads per context.
+    */
+   private async computeParallelism(perContextMB: number, reserveMB = 0): Promise<number> {
++    if (currentCompatibility()) return 1;
+     const llama = await this.ensureLlama();
+ 
+     if (!this.isCpuOffloadForced() && llama.gpu) {
+@@ -1240,9 +1250,11 @@ export class LlamaCpp implements LLM {
+         try {
+           this.embedContexts.push(await model.createEmbeddingContext({
+             contextSize: LlamaCpp.EMBED_CONTEXT_SIZE,
++            ...(currentCompatibility()?.signal ? { createSignal: currentCompatibility()!.signal } : {}),
+             ...(threads > 0 ? { threads } : {}),
+           }));
+-        } catch {
++        } catch (error) {
++          if (currentCompatibility()) throw error;
+           if (this.embedContexts.length === 0) throw new Error("Failed to create any embedding context");
+           break;
+         }
+@@ -1362,16 +1374,23 @@ export class LlamaCpp implements LLM {
+     // the inactivity timer disposed the loser → "Object is disposed" (#682).
+     this.rerankContextsCreatePromise = (async () => {
+       this.touchActivity();
+-      const model = await this.ensureRerankModel();
++      const model = await this.ensureRerankModel().catch(error => {
++        compatibilityCheck();
++        if (currentCompatibility()) throw new CompatibilityError("RERANK_UNAVAILABLE");
++        throw error;
++      });
+       const n = Math.min(await this.computeParallelism(1000), 4);
+       const threads = await this.threadsPerContext(n);
+       for (let i = 0; i < n; i++) {
+         try {
+           this.rerankContexts.push(await model.createRankingContext({
+             contextSize: LlamaCpp.RERANK_CONTEXT_SIZE,
++            ...(currentCompatibility()?.signal ? { createSignal: currentCompatibility()!.signal } : {}),
+             ...(threads > 0 ? { threads } : {}),
+           }));
+         } catch (error) {
++          compatibilityCheck();
++          if (currentCompatibility()) throw new CompatibilityError("RERANK_UNAVAILABLE");
+           if (this.rerankContexts.length === 0) {
+             // Surface the underlying failure (e.g. out of VRAM). A previous
+             // "retry without flash attention" path was dead: ranking contexts
+@@ -1461,6 +1480,7 @@ export class LlamaCpp implements LLM {
+     if (maxTokens <= 0) return { text, truncated: false, limit: maxTokens };
+ 
+     const tokens = this.embedModel.tokenize(text);
++    if (currentCompatibility()) { compatibilityTokens(tokens.length, "document"); return { text, truncated: false, limit: maxTokens }; }
+     if (tokens.length <= maxTokens) return { text, truncated: false, limit: maxTokens };
+ 
+     // Leave a small margin (4 tokens) for BOS/EOS overhead
+@@ -1473,9 +1493,11 @@ export class LlamaCpp implements LLM {
+   async embed(text: string, options: EmbedOptions = {}): Promise<EmbeddingResult | null> {
+     // Ping activity at start to keep models alive during this operation
+     this.touchActivity();
++    await compatibilityYield("embedding");
+ 
+     try {
+       const context = await this.ensureEmbedContext();
++      if (currentCompatibility() && options.isQuery) compatibilityTokens(this.embedModel!.tokenize(text).length, "query");
+ 
+       // Guard: truncate text that exceeds model context window to prevent GGML crash
+       const { text: safeText, truncated, limit } = await this.truncateToContextSize(text);
+@@ -1483,13 +1505,16 @@ export class LlamaCpp implements LLM {
+         console.warn(`⚠ Text truncated to fit embedding context (${limit} tokens)`);
+       }
+ 
++      if (currentCompatibility()) currentCompatibility()!.stats.embeddingCalls++;
+       const embedding = await context.getEmbeddingFor(safeText);
++      await compatibilityYield("embedding-complete");
+ 
+       return {
+         embedding: Array.from(embedding.vector),
+         model: options.model ?? this.embedModelUri,
+       };
+     } catch (error) {
++      if (currentCompatibility()) throw error;
+       console.error("Embedding error:", error);
+       return null;
+     }
+@@ -1503,11 +1528,13 @@ export class LlamaCpp implements LLM {
+     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
+     // Ping activity at start to keep models alive during this operation
+     this.touchActivity();
++    await compatibilityYield("embedding");
+ 
+     if (texts.length === 0) return [];
+ 
+     try {
+       const contexts = await this.ensureEmbedContexts();
++      if (currentCompatibility()) for (const text of texts) compatibilityTokens(this.embedModel!.tokenize(text).length, "document");
+       const n = contexts.length;
+ 
+       if (n === 1) {
+@@ -1520,10 +1547,14 @@ export class LlamaCpp implements LLM {
+             if (truncated) {
+               console.warn(`⚠ Batch text truncated to fit embedding context (${limit} tokens)`);
+             }
++            await compatibilityYield("embedding");
++            if (currentCompatibility()) currentCompatibility()!.stats.embeddingCalls++;
+             const embedding = await context.getEmbeddingFor(safeText);
++            await compatibilityYield("embedding-complete");
+             this.touchActivity();
+             embeddings.push({ embedding: Array.from(embedding.vector), model: options.model ?? this.embedModelUri });
+           } catch (err) {
++            if (currentCompatibility()) throw err;
+             console.error("Embedding error for text:", err);
+             embeddings.push(null);
+           }
+@@ -1549,8 +1580,10 @@ export class LlamaCpp implements LLM {
+               }
+               const embedding = await ctx.getEmbeddingFor(safeText);
+               this.touchActivity();
++              await compatibilityYield("embedding-complete");
+               results.push({ embedding: Array.from(embedding.vector), model: options.model ?? this.embedModelUri });
+             } catch (err) {
++              if (currentCompatibility()) throw err;
+               console.error("Embedding error for text:", err);
+               results.push(null);
+             }
+@@ -1561,6 +1594,7 @@ export class LlamaCpp implements LLM {
+ 
+       return chunkResults.flat();
+     } catch (error) {
++      if (currentCompatibility()) throw error;
+       console.error("Batch embedding error:", error);
+       return texts.map(() => null);
+     }
+@@ -1631,6 +1665,8 @@ export class LlamaCpp implements LLM {
+     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
+     // Ping activity at start to keep models alive during this operation
+     this.touchActivity();
++    await compatibilityYield("expansion");
++    if (currentCompatibility()) currentCompatibility()!.stats.expansionCalls++;
+ 
+     const llama = await this.ensureLlama();
+     await this.ensureGenerateModel();
+@@ -1707,6 +1743,7 @@ export class LlamaCpp implements LLM {
+       const filtered = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
+       if (filtered.length > 0) return filtered;
+ 
++      if (currentCompatibility()) throw new CompatibilityError("EXPANSION_UNAVAILABLE");
+       const fallback: Queryable[] = [
+         { type: 'hyde', text: `Information about ${query}` },
+         { type: 'lex', text: query },
+@@ -1714,6 +1751,7 @@ export class LlamaCpp implements LLM {
+       ];
+       return includeLexical ? fallback : fallback.filter(q => q.type !== 'lex');
+     } catch (error) {
++      if (currentCompatibility()) throw error;
+       console.error("Structured query expansion failed:", error);
+       // Fallback to original query
+       const fallback: Queryable[] = [{ type: 'vec', text: query }];
+@@ -1739,7 +1777,9 @@ export class LlamaCpp implements LLM {
+     // Ping activity at start to keep models alive during this operation
+     this.touchActivity();
+ 
++    await compatibilityYield("reranking");
+     const contexts = await this.ensureRerankContexts();
++    if (currentCompatibility() && contexts.length === 0) throw new CompatibilityError("RERANK_UNAVAILABLE");
+     if (contexts.length === 0) {
+       return {
+         results: documents.map((d) => ({ ...d, score: 0.5, index: 0 })),
+@@ -1761,6 +1801,12 @@ export class LlamaCpp implements LLM {
+       }
+ 
+       const tokens = model.tokenize(doc.text);
++      if (currentCompatibility()) {
++        const inspector = contexts[0] as unknown as { _getEvaluationInput(query: string, document: string): readonly number[] };
++        if (typeof inspector._getEvaluationInput !== "function") throw new CompatibilityError("COMPATIBILITY_FAILED");
++        compatibilityTokens(inspector._getEvaluationInput(query, doc.text).length, "rerank");
++        return doc;
++      }
+       const truncatedText = tokens.length <= maxDocTokens
+         ? doc.text
+         : model.detokenize(tokens.slice(0, maxDocTokens));
+@@ -1802,9 +1848,16 @@ export class LlamaCpp implements LLM {
+       texts.slice(i * chunkSize, (i + 1) * chunkSize)
+     ).filter(chunk => chunk.length > 0);
+ 
+-    const allScores = await Promise.all(
+-      chunks.map((chunk, i) => activeContexts[i]!.rankAll(query, chunk))
+-    );
++    const allScores = currentCompatibility() ? [await (async () => {
++      const scores: number[] = [];
++      for (const text of texts) {
++        await compatibilityYield("rerank-document", scores.length);
++        currentCompatibility()!.stats.rerankingCalls++;
++        scores.push(await contexts[0]!.rank(query, text));
++      }
++      await compatibilityYield("rerank-complete", scores.length);
++      return scores;
++    })()] : await Promise.all(chunks.map((chunk, i) => activeContexts[i]!.rankAll(query, chunk)));
+ 
+     // Reassemble scores in original order and sort
+     const flatScores = allScores.flat();
+@@ -1861,6 +1914,13 @@ export class LlamaCpp implements LLM {
+     };
+   }
+ 
++  async dsearchInspectRerank(query: string, text: string): Promise<{ tokens: number; limit: number }> {
++    const contexts = await this.ensureRerankContexts();
++    const context = contexts[0] as unknown as { _getEvaluationInput(q: string, d: string): readonly number[] } | undefined;
++    if (!context || typeof context._getEvaluationInput !== "function") throw new CompatibilityError("COMPATIBILITY_FAILED");
++    return { tokens: context._getEvaluationInput(query, text).length, limit: LlamaCpp.RERANK_CONTEXT_SIZE };
++  }
++
+   async dispose(): Promise<void> {
+     // Prevent double-dispose
+     if (this.disposed) {
+diff --git a/src/store.ts b/src/store.ts
+index 4b3b0f6..e45b09a 100644
+--- a/src/store.ts
++++ b/src/store.ts
+@@ -1,3 +1,4 @@
++import { currentCompatibility, compatibilityYield, CompatibilityError } from "./dsearch-compat.js";
+ /**
+  * QMD Store - Core data access and retrieval functions
+  *
+@@ -48,7 +49,7 @@ import {
+ } from "./store-migrations.js";
+ import type { Database, SQLiteValue } from "./db.js";
+ import picomatch from "picomatch";
+-import { createHash } from "crypto";
++import { createHash, randomUUID } from "crypto";
+ import { readFileSync, realpathSync, statSync, mkdirSync } from "node:fs";
+ // Note: node:path resolve is not imported — we export our own cross-platform resolve()
+ import fastGlob from "fast-glob";
+@@ -1234,7 +1235,7 @@ function rebuildFTSForCjkNormalization(db: Database): void {
+   }
+ }
+ 
+-function initializeDatabase(db: Database): void {
++function initializeDatabase(db: Database, readOnly = false): void {
+   try {
+     loadSqliteVec(db);
+     verifySqliteVecLoaded(db);
+@@ -1247,6 +1248,14 @@ function initializeDatabase(db: Database): void {
+     console.warn(_sqliteVecUnavailableReason);
+   }
+   db.exec("PRAGMA foreign_keys = ON");
++  if (readOnly) {
++    // A sealed generation must already contain the current schema. Never migrate on read.
++    db.prepare("SELECT id, collection, path, hash FROM documents LIMIT 0").all();
++    db.prepare("SELECT hash, seq, embed_fingerprint FROM content_vectors LIMIT 0").all();
++    db.prepare("SELECT name, path FROM store_collections LIMIT 0").all();
++    db.prepare("SELECT key, value FROM store_config LIMIT 0").all();
++    return;
++  }
+ 
+   // Drop legacy tables that are now managed in YAML
+   db.exec(`DROP TABLE IF EXISTS path_contexts`);
+@@ -2107,6 +2116,7 @@ export type EmbedResult = {
+   errors: number;
+   failures?: EmbedFailure[];
+   durationMs: number;
++  remainingDocs?: number;
+ };
+ 
+ export type EmbedOptions = {
+@@ -2118,6 +2128,8 @@ export type EmbedOptions = {
+    */
+   collection?: string;
+   maxDocsPerBatch?: number;
++  /** Pinned dsearch extension: bound an entire call, not just its internal batches. */
++  maxDocsPerCall?: number;
+   maxBatchBytes?: number;
+   chunkStrategy?: ChunkStrategy;
+   /**
+@@ -2347,10 +2359,12 @@ export async function generateEmbeddings(
+   }
+ 
+   const chunksCopied = copyVectorsToNewCollections(db, options?.collection).copied;
+-  const docsToEmbed = getPendingEmbeddingDocs(db, options?.collection, model);
++  const pending = getPendingEmbeddingDocs(db, options?.collection, model);
++  const callLimit = options?.maxDocsPerCall === undefined ? pending.length : validatePositiveIntegerOption("maxDocsPerCall", options.maxDocsPerCall, 4);
++  const docsToEmbed = pending.slice(0, callLimit);
+ 
+   if (docsToEmbed.length === 0) {
+-    return { docsProcessed: 0, chunksEmbedded: 0, chunksCopied, errors: 0, durationMs: 0 };
++    return { docsProcessed: 0, chunksEmbedded: 0, chunksCopied, errors: 0, durationMs: 0, remainingDocs: 0 };
+   }
+   const totalBytes = docsToEmbed.reduce((sum, doc) => sum + Math.max(0, doc.bytes), 0);
+   const totalDocs = docsToEmbed.length;
+@@ -2365,7 +2379,7 @@ export async function generateEmbeddings(
+     let bytesProcessed = 0;
+     let totalChunks = 0;
+     let vectorTableInitialized = false;
+-    const BATCH_SIZE = 32;
++    const BATCH_SIZE = currentCompatibility() ? 4 : 32;
+     const RETRY_AFTER_SUCCESSFUL_CHUNKS = 64;
+     const MAX_RETRY_ATTEMPTS = 3;
+     const failures = new Map<string, EmbedFailure>();
+@@ -2410,6 +2424,7 @@ export async function generateEmbeddings(
+         clearFailure(chunk);
+         return true;
+       } catch (error) {
++        if (currentCompatibility()) throw error;
+         recordFailure(chunk, reasonFromError(error));
+         return false;
+       }
+@@ -2440,6 +2455,7 @@ export async function generateEmbeddings(
+     const batches = buildEmbeddingBatches(docsToEmbed, maxDocsPerBatch, maxBatchBytes);
+ 
+     for (const batchMeta of batches) {
++      await compatibilityYield("embedding-batch", chunksEmbedded);
+       // Abort early if session has been invalidated
+       if (!session.isValid) {
+         console.warn(`⚠ Session expired — skipping remaining document batches`);
+@@ -2552,6 +2568,7 @@ export async function generateEmbeddings(
+           batchChunkBytesProcessed += chunkBatch.reduce((sum, chunk) => sum + chunk.bytes, 0);
+           await retryFailedChunks();
+         } catch (error) {
++          if (currentCompatibility()) throw error;
+           // Batch failed — try individual embeddings as fallback. If an
+           // individual retry succeeds, any prior failure for that chunk is
+           // cleared, so the visible error count reflects outstanding failures.
+@@ -2602,6 +2619,7 @@ export async function generateEmbeddings(
+     errors: result.errors,
+     failures: result.failures,
+     durationMs: Date.now() - startTime,
++    remainingDocs: getPendingEmbeddingDocs(db, options?.collection, model).length,
+   };
+ }
+ 
+@@ -2612,10 +2630,10 @@ export async function generateEmbeddings(
+  * @param dbPath - Path to the SQLite database file
+  * @returns Store instance with all methods bound to the database
+  */
+-export function createStore(dbPath?: string): Store {
++export function createStore(dbPath?: string, options: { readOnly?: boolean } = {}): Store {
+   const resolvedPath = dbPath || getDefaultDbPath();
+-  const db = openDatabase(resolvedPath);
+-  initializeDatabase(db);
++  const db = openDatabase(resolvedPath, options.readOnly === true);
++  try { initializeDatabase(db, options.readOnly === true); } catch (error) { db.close(); throw error; }
+ 
+   const store: Store = {
+     db,
+@@ -3120,11 +3138,15 @@ export function getCacheKey(url: string, body: CacheKeyBody): string {
+ }
+ 
+ export function getCachedResult(db: Database, cacheKey: string): string | null {
++  const request = currentCompatibility();
++  if (request) { request.stats.memoryCacheReads++; return request.cache.get(cacheKey); }
+   const row = db.prepare(`SELECT result FROM llm_cache WHERE hash = ?`).get(cacheKey) as { result: string } | null;
+   return row?.result ?? null;
+ }
+ 
+ export function setCachedResult(db: Database, cacheKey: string, result: string): void {
++  const request = currentCompatibility();
++  if (request) { request.stats.memoryCacheWrites++; request.cache.set(cacheKey, result); return; }
+   const now = new Date().toISOString();
+   db.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
+   if (Math.random() < 0.01) {
+@@ -5309,6 +5331,7 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
+  */
+ export function deleteExpansionCacheEntry(db: Database, query: string, model: string = DEFAULT_QUERY_MODEL): void {
+   const cacheKey = getCacheKey("expandQuery", { query, model });
++  if (currentCompatibility()) { currentCompatibility()!.cache.delete(cacheKey); return; }
+   db.prepare(`DELETE FROM llm_cache WHERE hash = ?`).run(cacheKey);
+ }
+ 
+@@ -5317,6 +5340,7 @@ export function deleteExpansionCacheEntry(db: Database, query: string, model: st
+ // =============================================================================
+ 
+ export async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<{ file: string; score: number }[]> {
++  if (currentCompatibility()) currentCompatibility()!.stats.rerankAttempted = true;
+   // Prepend intent to rerank query so the reranker scores with domain context
+   const rerankQuery = intent ? `${intent}\n\n${query}` : query;
+   const llm = llmOverride ?? getDefaultLlamaCpp();
+@@ -5359,6 +5383,7 @@ export async function rerank(query: string, documents: { file: string; text: str
+   }
+ 
+   // Return all results sorted by score
++  if (currentCompatibility()) currentCompatibility()!.stats.rerankSucceeded = true;
+   return documents
+     .map(doc => ({ file: doc.file, score: cachedResults.get(doc.text) || 0 }))
+     .sort((a, b) => b.score - a.score);
+@@ -6171,6 +6196,8 @@ export function addLineNumbers(text: string, startLine: number = 1): string {
+  * CLI wires these to stderr for user feedback; MCP leaves them unset.
+  */
+ export interface SearchHooks {
++  /** Exact RRF pool before chunk selection/reranking. Metadata copies only; never document bodies. */
++  onCandidates?: (candidates: readonly {file:string;rank:number;score:number}[]) => void;
+   /** BM25 probe found strong signal — expansion will be skipped */
+   onStrongSignal?: (topScore: number) => void;
+   /** Query expansion starting */
+@@ -6400,6 +6427,8 @@ export async function hybridQuery(
+   const fused = reciprocalRankFusion(rankedLists, weights);
+   const rrfTraceByFile = explain ? buildRrfTrace(rankedLists, weights, rankedListMeta) : null;
+   const candidates = fused.slice(0, candidateLimit);
++  if (currentCompatibility()) currentCompatibility()!.stats.actualCandidates = candidates.length;
++  hooks?.onCandidates?.(candidates.map((candidate,index)=>({file:candidate.file,rank:index+1,score:candidate.score})));
+ 
+   if (candidates.length === 0) return [];
+ 
+@@ -6783,13 +6812,15 @@ export async function structuredSearch(
+     }
+   }
+ 
+-  if (rankedLists.length === 0) return [];
++  if (rankedLists.length === 0) { hooks?.onCandidates?.([]); return []; }
+ 
+   // Step 3: RRF fusion — first list gets 2x weight (assume caller ordered by importance)
+   const weights = rankedLists.map((_, i) => i === 0 ? 2.0 : 1.0);
+   const fused = reciprocalRankFusion(rankedLists, weights);
+   const rrfTraceByFile = explain ? buildRrfTrace(rankedLists, weights, rankedListMeta) : null;
+   const candidates = fused.slice(0, candidateLimit);
++  if (currentCompatibility()) currentCompatibility()!.stats.actualCandidates = candidates.length;
++  hooks?.onCandidates?.(candidates.map((candidate,index)=>({file:candidate.file,rank:index+1,score:candidate.score})));
+ 
+   if (candidates.length === 0) return [];
+ 
+@@ -6953,3 +6984,73 @@ export async function structuredSearch(
+     .slice(0, limit);
+   return attachResultMetadata(store.db, finalResults);
+ }
++
++export async function dsearchInspectProjection(store: Store, text: string, _title: string, file: string) {
++  const llm = getLlm(store);
++  const actualTitle = extractTitle(text, file);
++  const formatted = formatDocForEmbedding(text, actualTitle, llm.embedModelName);
++  const embeddingTokens = await llm.countTokens(formatted);
++  const embedding = await chunkDocumentByTokensWithLlm(llm, text, undefined, undefined, undefined, file, "regex");
++  const search = await chunkDocumentAsync(text, undefined, undefined, undefined, file, "regex");
++  return { actualTitle, embeddingTokens, embeddingChunks: embedding.length, searchChunks: search.length,
++    safe: text.length <= 2400 && embeddingTokens <= 800 && embedding.length === 1 && search.length === 1 };
++}
++
++// Map only requested UTF-16 boundaries; no dense per-character offset array is needed.
++function dsearchCjkOffsets(text: string, offsets: number[], reverse: boolean): number[] {
++  const points = [...new Set(offsets)].sort((a, b) => a - b), mapped = new Map<number, number>();
++  let cursor = 0, original = 0, normalized = 0;
++  const emit = (length: number, generated = false) => {
++    const from = reverse ? normalized : original, width = generated ? (reverse ? 1 : 0) : length;
++    while (cursor < points.length && points[cursor]! <= from + width) {
++      const point = points[cursor++]!;
++      if (point < from) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++      mapped.set(point, (reverse ? original : normalized) + (generated ? 0 : point - from));
++    }
++    if (!generated) original += length;
++    normalized += generated ? 1 : length;
++  };
++  for (const match of text.matchAll(CJK_RUN_PATTERN)) {
++    emit(match.index! - original);emit(0, true);
++    const chars = [...match[0]];
++    for (let i = 0; i < chars.length; i++) { if (i) emit(0, true);emit(chars[i]!.length); }
++    emit(0, true);
++  }
++  emit(text.length - original);
++  if (cursor !== points.length) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++  return offsets.map(point => mapped.get(point)!);
++}
++
++/** Exact FTS highlight ranges from the existing index, restricted to caller-verified primary spans. */
++export async function dsearchLexicalMatches(store: Store, query: string, inputs: { file: string; primaryRanges: { start: number; end: number }[] }[]) {
++  if (inputs.length > 80) throw new CompatibilityError("INVALID_REQUEST");
++  const fts = buildFTS5Query(query);if (!fts) return [];
++  const result = [];
++  for (const input of inputs) {
++    await compatibilityYield("locating-evidence", result.length);
++    const uri = /^qmd:\/\/([A-Za-z0-9_-]{1,128})\/(.{1,4096})$/.exec(input.file);
++    if (!uri || input.primaryRanges.length > 128) throw new CompatibilityError("INVALID_REQUEST");
++    const marker = randomUUID(), begin = "<" + marker + ">", finish = "</" + marker + ">";
++    const row = store.db.prepare(`SELECT content.doc AS original,documents_fts.body AS normalized,
++      highlight(documents_fts,2,?,?) AS marked FROM documents_fts
++      JOIN documents d ON d.id=documents_fts.rowid JOIN content ON content.hash=d.hash
++      WHERE documents_fts MATCH ? AND d.active=1 AND d.collection=? AND d.path=?`).get(begin, finish, fts, uri[1]!, uri[2]!) as { original: string; normalized: string; marked: string } | undefined;
++    if (!row) continue;
++    if (row.normalized !== normalizeCjkForFTS(row.original) || row.original.includes(begin) || row.original.includes(finish)) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++    for (const span of input.primaryRanges) if (!Number.isSafeInteger(span.start) || !Number.isSafeInteger(span.end) || span.start < 0 || span.end < span.start || span.end > row.original.length) throw new CompatibilityError("INVALID_REQUEST");
++    const boundaries = dsearchCjkOffsets(row.original, input.primaryRanges.flatMap(span => [span.start, span.end]), false);
++    const primary = input.primaryRanges.map((_, i) => ({ start: boundaries[2 * i]!, end: boundaries[2 * i + 1]! }));
++    const ranges: { start: number; end: number }[] = [];let cursor = 0, inserted = 0;
++    while (ranges.length < 64) {
++      const from = row.marked.indexOf(begin, cursor);if (from < 0) break;
++      const to = row.marked.indexOf(finish, from + begin.length);if (to < 0) throw new CompatibilityError("SOURCE_MAP_MISMATCH");
++      const start = from - inserted, end = to - inserted - begin.length;
++      if (primary.some(span => start < span.end && end > span.start)) ranges.push({ start, end });
++      inserted += begin.length + finish.length;cursor = to + finish.length;
++    }
++    const original = dsearchCjkOffsets(row.original, ranges.flatMap(span => [span.start, span.end]), true);
++    result.push({ file: input.file, projectionSha256: createHash("sha256").update(row.original).digest("hex"),
++      ranges: ranges.map((_, i) => ({ start: original[2 * i]!, end: original[2 * i + 1]! })) });
++  }
++  return result;
++}

@@ -3,9 +3,9 @@ import {readFile,writeFile,mkdir,copyFile,access,symlink,realpath} from 'node:fs
 import {createHash} from 'node:crypto';
 import {resolve,join} from 'node:path';
 import {engineArtifact,fileDigest} from '../packages/runtime/dist/index.js';
-const root=resolve(import.meta.dirname,'..'),recovery=process.argv.includes('--recovery');const engine=join(root,recovery?'.local/qmd-recovery':'.local/qmd-upstream');
+const root=resolve(import.meta.dirname,'..'),variant=process.argv.includes('--audited')?'audited':process.argv.includes('--recovery')?'recovery':'base';const engine=join(root,variant==='base'?'.local/qmd-upstream':'.local/qmd-'+variant);
 const registry=JSON.parse(await readFile(join(root,'vendor/qmd-upstream.json'),'utf8'));
-const source=recovery?{...registry,...registry.recovery}:registry;
+const source=variant==='base'?registry:{...registry,...registry[variant]};
 const patchPath=join(root,'vendor/qmd-patches',source.patchFile??'compat-v1.patch'),patch=await readFile(patchPath);
 const hash=x=>createHash('sha256').update(x).digest('hex');
 function run(cmd,args,cwd=root,options={}) {
@@ -37,11 +37,12 @@ run('pnpm',['install','--frozen-lockfile','--ignore-scripts'],engine);
 run('pnpm',['rebuild','better-sqlite3','node-llama-cpp','tree-sitter-go','tree-sitter-python','tree-sitter-rust','tree-sitter-typescript'],engine);
 run(process.execPath,['scripts/build.mjs'],engine);
 const artifact=await engineArtifact(engine);
+if(hash(patch)!==source.patchSha256||artifact.sha256!==source.engineArtifactSha256)throw new Error('Prepared engine differs from the pinned patch or artifact');
 const manifest={schema_version:1,upstream_commit:source.commit,patch_digest:hash(patch),artifact_sha256:artifact.sha256,
  lock_sha256:await fileDigest(join(root,'vendor/qmd-lock.yaml')),node_exact:process.versions.node,node_llama_cpp:'3.20.0',files:artifact.files};
 await writeFile(join(engine,'dsearch-artifact.json'),JSON.stringify(manifest,null,2)+'\n');
 // The unpatched reference shares the base engine dependencies, not the recovery variant's install.
-if(!recovery){
+if(variant==='base'){
 const reference=join(root,'.local/qmd-reference');
 if(!await access(join(reference,'package.json')).then(()=>true,()=>false)) {
  await mkdir(reference,{recursive:true});
@@ -65,6 +66,6 @@ run(process.execPath,['scripts/build.mjs'],reference);
 const referenceArtifact=await engineArtifact(reference);
 await writeFile(join(reference,'dsearch-artifact.json'),JSON.stringify({upstream_commit:source.commit,artifact_sha256:referenceArtifact.sha256,files:referenceArtifact.files},null,2)+'\n');
 }
-console.log(JSON.stringify({engine:source.commit,patch_digest:manifest.patch_digest,artifact_sha256:manifest.artifact_sha256,reference:recovery?undefined:'unpatched',status:'prepared'},null,2));
+console.log(JSON.stringify({engine:source.commit,patch_digest:manifest.patch_digest,artifact_sha256:manifest.artifact_sha256,reference:variant==='base'?'unpatched':undefined,status:'prepared'},null,2));
 
-if(!recovery)process.stdout.write(run(process.execPath,[import.meta.filename,"--recovery"]));
+if(variant==='base'){process.stdout.write(run(process.execPath,[import.meta.filename,'--recovery']));process.stdout.write(run(process.execPath,[import.meta.filename,'--audited']));}

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { StateStore, Catalog, canonicalJSON, digest } from '@dsearch/catalog';
 import { createAlphaProfile, atomicFile, reconcileInterruptedBuilds, BackupStore, GenerationGC, reconcileGC, maintenanceActive } from '@dsearch/generations';
-import { ReaderPool, SourceSearch, SearchSessions } from '@dsearch/search';
+import { ReaderPool, SourceSearch, SearchSessions, type CandidateSnapshot } from '@dsearch/search';
 import { API_VERSION, DsearchError, ErrorCode, CollectionRequest, ReadRequest, ProfileManifest, DocumentRef } from '@dsearch/contracts';
 import { CollectionInfo, CollectionPatch, ReconcileRequest, JobInfo, AppStatus, ReadResponse, ExportRequest, CoverageRequest, ModelAction, ActivateRequest, RollbackRequest, PrepareProfileRequest, GCPolicy, GCApply, MaintenanceResult, retryableJobCode } from '@dsearch/contracts/control';
 import { PreferenceStore, exportSearch, openRegisteredDocument } from './management.js';
@@ -82,6 +82,7 @@ export type ApplicationOptions = {
     port?: number;
     now?: () => number;
     maintenanceFault?: (phase:string)=>void|Promise<void>;
+    onCandidateReceipt?: (receipt:CandidateSnapshot)=>void;
     synchronization?: ConstructorParameters<typeof Synchronization>[1]&{enabled?:boolean};
 };
 export async function createApplication(options: ApplicationOptions = {}) {
@@ -99,7 +100,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
         const readers = new ReaderPool(catalog, { engineRoot, modelRoot, acceptProfile: fp => fp === profiles.fingerprint });
         stopWorkers = () => readers.close();
         profiles = new ProfileController(catalog, { profiles: knownProfiles, engineRoot, modelRoot, models, lane, readers });
-        const sessions = new SearchSessions(new SourceSearch(catalog), readers, { lane });
+        const sessions = new SearchSessions(new SourceSearch(catalog,{...(options.onCandidateReceipt?{onCandidates:options.onCandidateReceipt}:{})}), readers, { lane });
         stopWorkers = async () => { await Promise.allSettled([profiles.close(), managed.close(), sessions.close()]); };
         const preferences = new PreferenceStore(root);await preferences.load();
         const synchronization=new Synchronization({catalog,enabled:()=>options.synchronization?.enabled??preferences.get().auto_sync,busy:()=>profiles.busy||managed.busy||maintenanceActive(state!),profile:()=>profiles.fingerprint,models:()=>models.availability(profiles.profile.models.embed.dimension===1024?'embed':'reference'),build:()=>profiles.builder.start(),cancel:id=>profiles.builder.cancel(id),published:()=>readers.sweep(),onWake:()=>lane.run(new AbortController().signal,()=>readers.unloadExcept(),'background')},options.synchronization);

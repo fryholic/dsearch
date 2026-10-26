@@ -9,7 +9,7 @@ export async function createAlphaProfile(engineRoot: string, embedRole: "embed" 
   await loadEngineArtifact(engineRoot, join(engineRoot, "dsearch-artifact.json"));
   const artifact = JSON.parse(await readFile(join(engineRoot, "dsearch-artifact.json"), "utf8"));
   const upstream = JSON.parse(await readFile(new URL("../../../vendor/qmd-upstream.json", import.meta.url), "utf8"));
-  if (![upstream, upstream.recovery].some(pin => pin && artifact.artifact_sha256 === pin.engineArtifactSha256 && artifact.patch_digest === pin.patchSha256) || artifact.upstream_commit !== upstream.commit) throw new DsearchError("COMPATIBILITY_FAILED");
+  if (![upstream, upstream.recovery, upstream.audited].some(pin => pin && artifact.artifact_sha256 === pin.engineArtifactSha256 && artifact.patch_digest === pin.patchSha256) || artifact.upstream_commit !== upstream.commit) throw new DsearchError("COMPATIBILITY_FAILED");
   const registry = JSON.parse(await readFile(new URL("../../../vendor/models/registry.json", import.meta.url), "utf8")) as { models: { role: string; repository: string; filename: string; revision: string; sha256: string }[] };
   const pick = (role: string) => { const model = registry.models.find(m => m.role === role);if (!model) throw new DsearchError("COMPATIBILITY_FAILED");return { repository: model.repository, filename: model.filename, repository_revision: model.revision, sha256: model.sha256, quantization: "Q8_0" as const }; };
   const compilerDigest = digest(canonicalJSON({
