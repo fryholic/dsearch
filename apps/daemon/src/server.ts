@@ -91,7 +91,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
     let state: StateStore | undefined, auth: LocalAuth | undefined, stopWorkers: (() => Promise<void>) | undefined, startupCleanup: (() => Promise<void>) | undefined;
     try {
         state = await StateStore.open(root);reconcileInterruptedBuilds(state);
-        const catalog = new Catalog(state), engineRoot = options.engineRoot ?? join(workspace, '.local/qmd-recovery'), modelRoot = options.modelRoot ?? join(workspace, '.local/models');
+        const catalog = new Catalog(state), engineRoot = options.engineRoot ?? join(workspace, '.local/qmd-audited'), modelRoot = options.modelRoot ?? join(workspace, '.local/models');
         const backups=new BackupStore(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{})}),collector=new GenerationGC(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{}),backupReferences:()=>backups.generationReferences()});await reconcileGC(catalog);await backups.reconcile();
         const knownProfiles = options.profile ? [ProfileManifest.parse(options.profile)] : (await Promise.all([createAlphaProfile(engineRoot), createAlphaProfile(engineRoot, 'reference')])).map(p => p.manifest);
         const recovery=await recoverActiveGeneration(catalog,{engineRoot,modelRoot,profileFingerprints:new Set(knownProfiles.map(p=>digest(canonicalJSON(p))))});

@@ -9,7 +9,7 @@ import {GenerationBuilder,createAlphaProfile,BackupStore,verifySeal} from '../..
 import {restoreBackup} from '../../apps/daemon/dist/index.js';
 import {createApplication} from '../fixtures/application.mjs';
 import {fileDigest} from '../../packages/runtime/dist/index.js';
-const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-recovery'),modelRoot=join(root,'.local/models');
+const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-audited'),modelRoot=join(root,'.local/models');
 test('SIGKILL during restore cannot turn a valid data root into an empty or mixed installation',async t=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/restore-kill-')),source=join(folder,'source'),target=join(folder,'restored');await mkdir(source);await writeFile(join(source,'guide.md'),'# Project guide\n\nRecord the owner before the milestone review.');
  const state=await StateStore.open(join(folder,'original')),catalog=new Catalog(state);await catalog.addCollection({name:'Projects',root:source});const profile=(await createAlphaProfile(engineRoot)).manifest;await new GenerationBuilder(catalog,{engineRoot,modelRoot,profile,embedRole:'embed'}).start().completion;const backup=await new BackupStore(catalog).create();state.close();const hash=await fileDigest(join(source,'guide.md'));

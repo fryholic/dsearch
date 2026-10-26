@@ -5,7 +5,7 @@ import {join,resolve} from 'node:path';
 import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
 import {GenerationBuilder,createAlphaProfile,BackupStore,verifySeal} from '../../packages/generations/dist/index.js';
 import {restoreBackup} from '../../apps/daemon/dist/index.js';
-const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-recovery'),modelRoot=join(root,'.local/models');
+const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-audited'),modelRoot=join(root,'.local/models');
 test('a backed-up interrupted build resumes after restoring its verified paths and source mappings',async()=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/restored-checkpoint-')),source=join(folder,'source'),target=join(folder,'restored');await mkdir(source);for(let i=0;i<11;i++)await writeFile(join(source,i+'.md'),'# Guide '+i+'\n\nRecord the milestone owner and review date '+i+'.');
  let state=await StateStore.open(join(folder,'original')),catalog=new Catalog(state);await catalog.addCollection({name:'Projects',root:source});const profile=(await createAlphaProfile(engineRoot)).manifest,options={engineRoot,modelRoot,profile,embedRole:'embed'};

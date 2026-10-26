@@ -10,7 +10,37 @@ import {restoreBackup} from '../../apps/daemon/dist/index.js';
 import {createApplication} from '../fixtures/application.mjs';
 import {fileDigest} from '../../packages/runtime/dist/index.js';
 import {canonicalJSON} from '../../packages/catalog/dist/index.js';
-const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-recovery'),modelRoot=join(root,'.local/models');
+const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-audited'),modelRoot=join(root,'.local/models');
+test('a prior recovery-engine archive stays restorable and rebuilds explicitly under the new default',async()=>{
+ await mkdir(join(root,'.local/alpha'),{recursive:true});
+ const folder=await mkdtemp(join(root,'.local/alpha/legacy-sdk-restore-')),source=join(folder,'source');await mkdir(source);
+ const original='# Project handoff\n\nRecord the milestone owner before replacing the installed application.';
+ await writeFile(join(source,'guide.md'),original);
+ let state=await StateStore.open(join(folder,'legacy'));let app;
+ try{
+  const catalog=new Catalog(state),collection=await catalog.addCollection({name:'Handoff',root:source});
+  const legacyRoot=join(root,'.local/qmd-recovery'),profile=(await createAlphaProfile(legacyRoot)).manifest;
+  await new GenerationBuilder(catalog,{engineRoot:legacyRoot,modelRoot,profile,embedRole:'embed'}).start().completion;
+  const doc=catalog.documents(collection.collection_id).find(d=>d.relative_path==='guide.md'),backup=await new BackupStore(catalog).create();
+  state.close();state=undefined;
+  const target=join(folder,'restored'),preview=await restoreBackup({backupPath:backup.path,targetRoot:target});
+  assert.equal(preview.rebuild_required,true);assert.equal(preview.models_ready,true);
+  await restoreBackup({backupPath:backup.path,targetRoot:target,apply:true,planId:preview.plan_id});
+  const db=new DatabaseSync(join(target,'state.sqlite'),{readOnly:true});
+  try{assert.equal(db.prepare('SELECT g.state FROM active_slot a JOIN generations g USING(generation_id)').get().state,'retired');}finally{db.close();}
+  app=await createApplication({dataRoot:target,modelRoot});
+  assert.equal(app.status().profile.profile_fp,(await createAlphaProfile(engineRoot)).fingerprint);
+  assert.equal(app.status().needs_rebuild,true);
+  const built=app.builder.start();await built.completion;assert.equal(app.status().jobs.find(j=>j.job_id===built.job_id).state,'succeeded');
+  assert.equal(app.status().needs_rebuild,false);
+  const accepted=app.sessions.createKeyword({query:'milestone owner',purpose:'find',mode:'hybrid',rerank:false,collections:[collection.collection_id]});
+  let result;
+  for(let i=0;i<6000;i++){result=app.sessions.get(accepted.search_id);if(['completed','failed','cancelled'].includes(result.state))break;await new Promise(r=>setTimeout(r,10));}
+  assert.equal(result.state,'completed',JSON.stringify(result));
+  assert.ok(result.results.some(d=>d.doc_id===doc.doc_id&&d.revision_id===doc.latest_revision_id));
+  assert.equal(await readFile(join(source,'guide.md'),'utf8'),original);
+ }finally{state?.close();await app?.close();await rm(folder,{recursive:true,force:true});}
+});
 test('offline restore validates models, rebases SDK paths and preserves newer state and original documents',async t=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/restore-')),source=join(folder,'source'),original=join(folder,'original'),target=join(folder,'restored');await mkdir(source);
  for(let i=0;i<2;i++)await writeFile(join(source,i+'.md'),'# Project '+i+'\n\nRecord the owner before the milestone review '+i+'.');

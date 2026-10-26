@@ -6,7 +6,7 @@ import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
 import {GenerationBuilder,createAlphaProfile,BackupStore,GenerationGC,readBackup,verifySeal} from '../../packages/generations/dist/index.js';
 import {restoreBackup} from '../../apps/daemon/dist/index.js';
 import {createApplication} from '../fixtures/application.mjs';
-const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-recovery'),modelRoot=join(root,'.local/models');
+const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-audited'),modelRoot=join(root,'.local/models');
 test('verified self-contained archives restore and serve evidence after redundant raw generations are collected',async()=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/archive-gc-')),source=join(folder,'source'),target=join(folder,'restored');await mkdir(source);await writeFile(join(source,'guide.md'),'# Project guide\n\nRecord the owner before the milestone review.');const state=await StateStore.open(join(folder,'data')),catalog=new Catalog(state);let app;
  try{
