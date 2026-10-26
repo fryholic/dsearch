@@ -5,7 +5,7 @@ import {join,resolve} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
 import {GenerationBuilder,createAlphaProfile} from '../../packages/generations/dist/index.js';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-recovery'),modelRoot=join(root,'.local/models');
 async function fixture(t){await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/active-recovery-')),source=join(folder,'source'),data=join(folder,'data');await mkdir(source);await writeFile(join(source,'guide.md'),'# Project guide\n\nRecord the owner before the milestone review.');t.after(()=>rm(folder,{recursive:true,force:true}));const state=await StateStore.open(data),catalog=new Catalog(state);await catalog.addCollection({name:'Projects',root:source});const profile=(await createAlphaProfile(engineRoot)).manifest,builder=new GenerationBuilder(catalog,{engineRoot,modelRoot,profile,embedRole:'embed'});try{const first=await builder.start().completion,second=await builder.start().completion;return {data,source,first,second};}finally{state.close();}}
 async function projection(data,id){const directory=join(data,'generations',id),mappings=JSON.parse(await readFile(join(directory,'mappings.json'),'utf8')),p=mappings[0];return join(directory,'projection',p.engine_collection,p.engine_relative_path);}

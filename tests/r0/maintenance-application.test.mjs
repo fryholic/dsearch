@@ -4,7 +4,7 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,writeFile,readFile,rm,access} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 import {pinGeneration} from '../../packages/generations/dist/index.js';
 const root=resolve(import.meta.dirname,'../..'),entry=join(root,'apps/cli/dist/main.js');
 async function cli(args){return new Promise((done,reject)=>{const child=spawn(process.execPath,[entry,...args,'--json'],{stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',v=>out+=v);child.stderr.on('data',v=>err+=v);child.on('error',reject);child.on('exit',code=>{try{done({code,packet:JSON.parse(out),err});}catch(error){reject(new Error(err+out));}});});}

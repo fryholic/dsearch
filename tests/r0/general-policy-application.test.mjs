@@ -8,7 +8,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 import {canonicalJSON,digest} from '../../packages/catalog/dist/index.js';
 const root=resolve(import.meta.dirname,'../..'),entry=join(root,'apps/cli/dist/main.js'),exec=promisify(execFile);
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');

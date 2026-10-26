@@ -4,7 +4,7 @@ import {mkdtemp,mkdir,writeFile,rm,readFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 const root=resolve(import.meta.dirname,'../..');
 test('MCP stdio uses real product search/read/related/compare DTOs and rejects stale revisions',async()=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/mcp-')),source=join(folder,'source');await mkdir(source);

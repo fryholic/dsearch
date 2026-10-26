@@ -34,7 +34,7 @@ Usage: pnpm dsearch <command> [options]
   jobs list|get|cancel|retry|result [id]
   collection update <id> [--name <name>] [--include <glob>] [--exclude <glob>] [--scope-json <json>] [--no-legacy-metadata]
   collection coverage <id>
-  settings get|set [--theme system|light|dark] [--mode lexical|hybrid] [--rerank|--no-rerank]
+  settings get|set [--auto-sync|--no-auto-sync] [--theme system|light|dark] [--mode lexical|hybrid] [--rerank|--no-rerank]
                   [--candidate-limit N] [--allow-degraded|--no-degraded]
   doctor [--output <file>]
   export <search-id> --output <file> [--include-query]
@@ -90,7 +90,7 @@ function print(packet: Packet) {
         process.stderr.write('Partial literal results: ' + d.stop_reason + '\n');
 }
 try {
-    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, 'scope-json': { type: 'string' }, 'no-legacy-metadata': { type: 'boolean' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, full: { type: 'boolean' }, apply: { type: 'boolean' }, 'target-root': { type: 'string' }, 'plan-id': { type: 'string' }, 'keep-retired': { type: 'string' }, 'min-age-seconds': { type: 'string' }, 'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
+    const { values: v, positionals: p } = parseArgs({ allowPositionals: true, strict: true, options: { help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, 'data-root': { type: 'string' }, name: { type: 'string' }, preset: { type: 'string' }, 'scope-json': { type: 'string' }, 'no-legacy-metadata': { type: 'boolean' }, collection: { type: 'string', multiple: true }, mode: { type: 'string' }, limit: { type: 'string' }, revision: { type: 'string' }, 'left-revision': { type: 'string' }, 'right-revision': { type: 'string' }, query: { type: 'string' }, lines: { type: 'string' }, 'no-start': { type: 'boolean' }, 'no-wait': { type: 'boolean' }, full: { type: 'boolean' }, apply: { type: 'boolean' }, 'target-root': { type: 'string' }, 'plan-id': { type: 'string' }, 'keep-retired': { type: 'string' }, 'min-age-seconds': { type: 'string' }, 'auto-sync':{type:'boolean'},'no-auto-sync':{type:'boolean'},'no-rerank': { type: 'boolean' }, rerank: { type: 'boolean' }, theme: { type: 'string' }, output: { type: 'string' }, 'include-query': { type: 'boolean' }, 'require-full': { type: 'boolean' }, include: { type: 'string', multiple: true }, exclude: { type: 'string', multiple: true }, 'allow-degraded': { type: 'boolean' }, 'candidate-limit': { type: 'string' }, 'ignore-case': { type: 'boolean' }, 'print-url': { type: 'boolean' }, wait: { type: 'boolean' }, generation: { type: 'string' }, 'expected-epoch': { type: 'string' }, 'filter-json': { type: 'string' }, 'no-degraded': { type: 'boolean' }, stdin: { type: 'boolean' } } });
     jsonOutput = !!v.json;
     if (v.help || !p.length) {
         process.stdout.write(help);
@@ -99,6 +99,7 @@ try {
     const root = resolve(v['data-root'] ?? defaultRoot()), command = p[0];
     if (!['serve', 'daemon', 'ui', 'status', 'collection', 'reconcile', 'sync', 'search', 'literal', 'read', 'related', 'compare', 'mcp', 'jobs', 'settings', 'doctor', 'export', 'open', 'model', 'profile', 'generation', 'backup', 'restore'].includes(command!))
         throw new DsearchError('INVALID_REQUEST');
+    if((v['auto-sync']||v['no-auto-sync'])&&(command!=='settings'||p[1]!=='set'||(v['auto-sync']&&v['no-auto-sync'])))throw new DsearchError('INVALID_REQUEST');
     if (v.full && !['reconcile','sync'].includes(command!)) throw new DsearchError('INVALID_REQUEST');
     if(v.apply&&command!=='restore'&&!(command==='generation'&&p[1]==='gc'))throw new DsearchError('INVALID_REQUEST');
     if(command==='restore'){
@@ -192,7 +193,7 @@ try {
     }
     else if (command === 'settings') {
         if (p.length !== 2 || !['get', 'set'].includes(p[1]!)) throw new DsearchError('INVALID_REQUEST');
-        packet = p[1] === 'get' ? await call('GET', '/v1/settings') : await call('PUT', '/v1/settings', Preferences.parse({ ...preferences, ...(v.theme ? { theme: v.theme } : {}), search: { ...preferences!.search, mode: requestedMode, rerank: requestedRerank, allow_degraded: requestedAllowDegraded, candidate_limit: candidateLimit } }));
+        packet = p[1] === 'get' ? await call('GET', '/v1/settings') : await call('PUT', '/v1/settings', Preferences.parse({ ...preferences, ...(v['auto-sync']?{auto_sync:true}:v['no-auto-sync']?{auto_sync:false}:{}), ...(v.theme ? { theme: v.theme } : {}), search: { ...preferences!.search, mode: requestedMode, rerank: requestedRerank, allow_degraded: requestedAllowDegraded, candidate_limit: candidateLimit } }));
     }
     else if (command === 'doctor') {
         if (p.length !== 1) throw new DsearchError('INVALID_REQUEST');packet = await call('POST', '/v1/diagnostics', {});

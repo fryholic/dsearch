@@ -15,6 +15,7 @@ import { PreferenceStore, exportSearch, openRegisteredDocument } from './managem
 import { ManagedJobs } from './jobs.js';
 import { ModelManager } from './models.js';
 import { ProfileController } from './profiles.js';
+import {Synchronization} from './synchronization.js';
 import { recoverActiveGeneration } from './recovery.js';
 import { reconcileRestore } from './restore.js';
 import { LocalAuth } from './auth.js';
@@ -81,6 +82,7 @@ export type ApplicationOptions = {
     port?: number;
     now?: () => number;
     maintenanceFault?: (phase:string)=>void|Promise<void>;
+    synchronization?: ConstructorParameters<typeof Synchronization>[1]&{enabled?:boolean};
 };
 export async function createApplication(options: ApplicationOptions = {}) {
     const requestedRoot=resolve(options.dataRoot ?? join(homedir(), 'Library/Application Support/dsearch'));await reconcileRestore(requestedRoot);
@@ -92,7 +94,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
         const backups=new BackupStore(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{})}),collector=new GenerationGC(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{}),backupReferences:()=>backups.generationReferences()});await reconcileGC(catalog);await backups.reconcile();
         const knownProfiles = options.profile ? [ProfileManifest.parse(options.profile)] : (await Promise.all([createAlphaProfile(engineRoot), createAlphaProfile(engineRoot, 'reference')])).map(p => p.manifest);
         const recovery=await recoverActiveGeneration(catalog,{engineRoot,modelRoot,profileFingerprints:new Set(knownProfiles.map(p=>digest(canonicalJSON(p))))});
-        const models = await ModelManager.open(modelRoot), managed = new ManagedJobs(state), lane = new HeavyLane();
+        const models = await ModelManager.open(modelRoot), managed = new ManagedJobs(state,{profiles:new Set(knownProfiles.map(p=>digest(canonicalJSON(p))))}), lane = new HeavyLane();
         let profiles: ProfileController;
         const readers = new ReaderPool(catalog, { engineRoot, modelRoot, acceptProfile: fp => fp === profiles.fingerprint });
         stopWorkers = () => readers.close();
@@ -100,6 +102,8 @@ export async function createApplication(options: ApplicationOptions = {}) {
         const sessions = new SearchSessions(new SourceSearch(catalog), readers, { lane });
         stopWorkers = async () => { await Promise.allSettled([profiles.close(), managed.close(), sessions.close()]); };
         const preferences = new PreferenceStore(root);await preferences.load();
+        const synchronization=new Synchronization({catalog,enabled:()=>options.synchronization?.enabled??preferences.get().auto_sync,busy:()=>profiles.busy||managed.busy||maintenanceActive(state!),profile:()=>profiles.fingerprint,models:()=>models.availability(profiles.profile.models.embed.dimension===1024?'embed':'reference'),build:()=>profiles.builder.start(),cancel:id=>profiles.builder.cancel(id),published:()=>readers.sweep(),onWake:()=>lane.run(new AbortController().signal,()=>readers.unloadExcept(),'background')},options.synchronization);
+        stopWorkers=async()=>{await Promise.allSettled([synchronization.close(),profiles.close(),managed.close(),sessions.close()]);};
         auth = await LocalAuth.open(root, instance, options.now);
         const authentication = auth, store = state, staticFiles = await assets(options.webRoot ?? join(workspace, 'apps/web/dist-web'));
         let origin = '', authority = '', closing: Promise<void> | undefined;
@@ -119,7 +123,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 for (const doc of JSON.parse(String(generation.coverage_json)))
                     coverage[doc.state] = (coverage[doc.state] ?? 0) + 1;
             const profileState = store.db.prepare('SELECT status FROM profiles WHERE profile_id=?').get(profile.profile_id)?.status ?? 'draft';
-            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, recovery:recovery.state==='rebuild_required'&&generation?{state:'recovered',damaged_generation_id:recovery.damaged_generation_id,recovered_generation_id:generation.generation_id}:recovery, busy: profiles.busy || managed.busy || maintenanceActive(store), scope_incomplete: catalog.listCollections().some(c => c.enabled && catalog.scanStatus(c.collection_id).status === 'incomplete'), needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, policy_upgrade_pending: catalog.policyUpgradePending, modes: { lexical: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, hybrid: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, deep: false, literal: true }, execution: { heavy_concurrency: 1, heavy_busy: lane.busy, maintenance_busy:maintenanceActive(store), queued_requests: lane.queued + sessions.queuedCount, resident_workers: readers.residentWorkers, idle_shutdown_seconds: 300 }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
+            return AppStatus.parse({ version: '0.1.0-alpha', instance_id: instance, pid: process.pid, source_seq: store.sourceSeq, generation: generation ? { generation_id: generation.generation_id, epoch: generation.epoch, profile_fp: generation.profile_fp, source_seq: generation.source_seq } : null, profile: { profile_id: profile.profile_id, profile_fp: profileFp, status: profileState }, recovery:recovery.state==='rebuild_required'&&generation?{state:'recovered',damaged_generation_id:recovery.damaged_generation_id,recovered_generation_id:generation.generation_id}:recovery, synchronization:synchronization.info(), busy: profiles.busy || managed.busy || synchronization.busy || maintenanceActive(store), scope_incomplete: catalog.listCollections().some(c => c.enabled && catalog.scanStatus(c.collection_id).status === 'incomplete'), needs_rebuild: !generation || generation.profile_fp !== profileFp || generation.source_seq !== store.sourceSeq, policy_upgrade_pending: catalog.policyUpgradePending, modes: { lexical: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, hybrid: !!generation && generation.profile_fp === profileFp && !catalog.policyUpgradePending, deep: false, literal: true }, execution: { heavy_concurrency: 1, heavy_busy: lane.busy, maintenance_busy:maintenanceActive(store), queued_requests: lane.queued + sessions.queuedCount, resident_workers: readers.residentWorkers, idle_shutdown_seconds: 300 }, coverage, jobs: store.db.prepare('SELECT job_id FROM jobs ORDER BY updated_at DESC LIMIT 20').all().map(row => jobInfo(String(row.job_id))) });
         };
         const requireOrigin = (req: IncomingMessage) => { if (req.headers.origin !== origin || (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin'))
             throw new DsearchError('SCOPE_DENIED'); };
@@ -158,7 +162,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 return;
             }
             const mode = authentication.authenticate(req, origin);
-            if(maintenanceActive(store)&&!['GET','HEAD'].includes(req.method??'')&&!['/v1/searches','/v1/related-searches','/v1/comparisons','/v1/literal-searches','/v1/documents/read','/v1/documents/info','/v1/documents/open','/v1/diagnostics','/v1/ui/code','/v1/shutdown'].includes(path)&&!(req.method==='DELETE'&&/^\/v1\/(jobs|searches)\/[A-Za-z0-9_-]+$/.test(path)))throw new DsearchError('BUSY');
+            if(maintenanceActive(store)&&!(path==='/v1/settings'&&synchronization.busy)&&!['GET','HEAD'].includes(req.method??'')&&!['/v1/searches','/v1/related-searches','/v1/comparisons','/v1/literal-searches','/v1/documents/read','/v1/documents/info','/v1/documents/open','/v1/diagnostics','/v1/ui/code','/v1/shutdown'].includes(path)&&!(req.method==='DELETE'&&/^\/v1\/(jobs|searches)\/[A-Za-z0-9_-]+$/.test(path)))throw new DsearchError('BUSY');
             if (path === '/v1/ui/session' && req.method === 'GET') {
                 const session = authentication.cookieSession(req, origin);
                 json(res, 200, envelope({ csrf_token: session.csrf }, requestId));
@@ -175,10 +179,10 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 return;
             }
             if (path === '/v1/settings' && req.method === 'GET') { json(res, 200, envelope(preferences.get(), requestId));return; }
-            if (path === '/v1/settings' && req.method === 'PUT') { json(res, 200, envelope(await preferences.set(await body(req)), requestId));return; }
+            if (path === '/v1/settings' && req.method === 'PUT') { const before=preferences.get().auto_sync,value=await preferences.set(await body(req));if(before!==value.auto_sync)synchronization.refresh();json(res, 200, envelope(value, requestId));return; }
             if (path === '/v1/diagnostics' && req.method === 'POST') {
                 const input = await body(req);if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) throw new DsearchError('INVALID_REQUEST');
-                const current = status();json(res, 200, envelope({ diagnostic_version: 1, created_at: new Date().toISOString(), runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, version: current.version, generation: current.generation, profile: current.profile, recovery:current.recovery, execution: current.execution, needs_rebuild: current.needs_rebuild, scope_incomplete: current.scope_incomplete, coverage: current.coverage, jobs: current.jobs.map(job => ({ state: job.state, phase: job.phase, error_code: job.error_code })), storage_policy: { queries: 'memory-only', results: 'memory-only', source_writes: false }, capabilities: { mcp: true, incremental_sync: true, backup_restore: true, deep: false } }, requestId));return;
+                const current = status();json(res, 200, envelope({ diagnostic_version: 1, created_at: new Date().toISOString(), runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, version: current.version, generation: current.generation, profile: current.profile, recovery:current.recovery,synchronization:current.synchronization, execution: current.execution, needs_rebuild: current.needs_rebuild, scope_incomplete: current.scope_incomplete, coverage: current.coverage, jobs: current.jobs.map(job => ({ state: job.state, phase: job.phase, error_code: job.error_code })), storage_policy: { queries: 'memory-only', results: 'memory-only', source_writes: false }, capabilities: { mcp: true, automatic_sync:true, incremental_sync: true, backup_restore: true, deep: false } }, requestId));return;
             }
             if (path === '/v1/documents/open' && req.method === 'POST') {
                 const parsed = DocumentRef.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
@@ -204,7 +208,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
             if (['/v1/models/check', '/v1/models/prepare'].includes(path) && req.method === 'POST') {
                 const parsed = ModelAction.safeParse(await body(req));if (!parsed.success) throw new DsearchError('INVALID_REQUEST');if (profiles.busy) throw new DsearchError('BUSY');
                 const roles = profiles.roles(profiles.resolve(parsed.data.profile_id)), download = path.endsWith('/prepare');
-                const accepted = managed.start(download ? 'model-prepare' : 'model-check', async (signal, progress) => { if (download) await models.prepare(roles, signal, progress);else await models.check(roles, signal, progress);await lane.run(signal, () => readers.unloadExcept()); }, null, { profile_id: parsed.data.profile_id });
+                const accepted = managed.start(download ? 'model-prepare' : 'model-check', async (signal, progress) => { if (download) await models.prepare(roles, signal, progress);else await models.check(roles, signal, progress);await lane.run(signal, () => readers.unloadExcept());synchronization.notify('models',true); }, null, { profile_id: parsed.data.profile_id });
                 json(res, 202, envelope(accepted, requestId));return;
             }
             const profileAction = /^\/v1\/profiles\/([A-Za-z0-9_-]{1,128})\/(prepare|build|activate)$/.exec(path);
@@ -224,7 +228,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 const parsed = CollectionRequest.safeParse(await body(req));
                 if (!parsed.success)
                     throw new DsearchError('INVALID_REQUEST');
-                const collection = await catalog.addCollection(parsed.data);
+                const collection = await catalog.addCollection(parsed.data);synchronization.notify('configuration');
                 json(res, 201, envelope(collectionInfo(collection.collection_id), requestId));
                 return;
             }
@@ -236,18 +240,18 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 if (!parsed.success)
                     throw new DsearchError('INVALID_REQUEST');
                 catalog.patch(collection[1]!, parsed.data);
-                sessions.invalidateCollection(collection[1]!);
+                sessions.invalidateCollection(collection[1]!);synchronization.notify('configuration');
                 json(res, 200, envelope(collectionInfo(collection[1]!), requestId));
                 return;
             }
-            if (collection && req.method === 'DELETE') { catalog.unregister(collection[1]!);sessions.invalidateCollection(collection[1]!);json(res, 200, envelope({ collection_id: collection[1], removed: true }, requestId));return; }
+            if (collection && req.method === 'DELETE') { catalog.unregister(collection[1]!);sessions.invalidateCollection(collection[1]!);synchronization.notify('configuration');json(res, 200, envelope({ collection_id: collection[1], removed: true }, requestId));return; }
             if (path === '/v1/reconcile' && req.method === 'POST') {
                 const value = await body(req);
                 const parsed = ReconcileRequest.safeParse(value);
                 if (!parsed.success) throw new DsearchError('INVALID_REQUEST');
                 if (managed.busy || profiles.busy) throw new DsearchError('BUSY');
                 const job = profiles.builder.start(parsed.data);
-                void job.completion.then(() => readers.sweep(), () => { });
+                void job.completion.then(() => {readers.sweep();synchronization.notify('periodic',true);}, () => { });
                 json(res, 202, envelope({ job_id: job.job_id, generation_id: job.generation_id, state: 'queued' }, requestId));
                 return;
             }
@@ -334,7 +338,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 if(row.kind==='backup'){json(res,202,envelope(startBackup(),requestId));return;}
                 if (['full-build','profile-build'].includes(String(row.kind))) {
                     const target = store.db.prepare('SELECT profile_id FROM generations WHERE generation_id=?').get(String(row.generation_id));if (!target) throw new DsearchError('NOT_FOUND');
-                    const accepted = cursor.checkpoint ? profiles.resume(retryJob[1]!) : profiles.prepare(String(target.profile_id), row.kind === 'full-build');json(res, 202, envelope({ job_id: accepted.job_id, generation_id: accepted.generation_id, state: 'queued' }, requestId));return;
+                    const accepted = cursor.checkpoint ? profiles.resume(retryJob[1]!) : profiles.prepare(String(target.profile_id), row.kind === 'full-build');void accepted.completion.then(()=>synchronization.notify('periodic',true),()=>{});json(res, 202, envelope({ job_id: accepted.job_id, generation_id: accepted.generation_id, state: 'queued' }, requestId));return;
                 }
                 const meta = JSON.parse(String(row.cursor_json)) as { profile_id?: string };if (!meta.profile_id) throw new DsearchError('INVALID_REQUEST');const target = profiles.resolve(meta.profile_id);
                 const kind = String(row.kind);if (!['model-check','model-prepare','profile-activate'].includes(kind)) throw new DsearchError('INVALID_REQUEST');
@@ -418,7 +422,8 @@ export async function createApplication(options: ApplicationOptions = {}) {
             })();
             return closing;
         }
-        return { url: origin, instance_id: instance, root, catalog, get builder() { return profiles.builder; }, profiles, models, sessions, status, close };
+        synchronization.start();
+        return { url: origin, instance_id: instance, root, catalog, synchronization, get builder() { return profiles.builder; }, profiles, models, sessions, status, close };
     }
     catch (e) {
         if (startupCleanup)

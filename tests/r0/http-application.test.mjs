@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm,stat} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {request} from 'node:http';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 const root=resolve(import.meta.dirname,'../..');
 test('actual application API registers, builds, searches, streams, reads and blocks stale or disabled sources',async t=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/http-')),sources=join(folder,'sources');await mkdir(sources);

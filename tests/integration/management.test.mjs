@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {PreferenceStore,exportSearch,openRegisteredDocument} from '../../apps/daemon/dist/management.js';
 import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 const artifact={repository:'test/model',filename:'model.gguf',repository_revision:'a'.repeat(40),sha256:'b'.repeat(64),quantization:'Q8_0'};
 const profile={schema_version:2,profile_id:'test-profile',engine:{repository:'https://github.com/tobi/qmd',source_version:'2.8.3',upstream_commit:'c'.repeat(40),patch_digest:'d'.repeat(64),artifact_sha256:'e'.repeat(64)},models:{embed:{...artifact,dimension:1024},rerank:artifact,expansion:null},input_policy:{compiler_version:'test',projection_utf16_cap:2400,embedding_input_token_cap:800,query_token_cap:512,rerank_context_tokens:4096,strict_no_truncation:true,cache_mode:'memory'},runtime:{node_exact:'24.21.0',node_llama_cpp:'3.20.0',platform:'darwin-arm64',heavy_concurrency:1,embed_parallelism:1,idle_worker_shutdown_seconds:300}};
 async function fixture(t){const root=await mkdtemp(join(tmpdir(),'dsearch-management-'));t.after(()=>rm(root,{recursive:true,force:true}));return root;}

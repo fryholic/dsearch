@@ -328,6 +328,7 @@ nav {
   max-width: 230px;
 }
 .checkbox {
+  min-height: 44px;
   display: flex;
   gap: 8px;
   align-items: center;

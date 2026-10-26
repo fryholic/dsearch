@@ -6,7 +6,7 @@ import {spawn} from 'node:child_process';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {LATEST_PROTOCOL_VERSION} from '@modelcontextprotocol/sdk/types.js';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 const root=resolve(import.meta.dirname,'../..'),sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const bounded=async(promise,label)=>{let timer;try{return await Promise.race([promise,new Promise((_,reject)=>timer=setTimeout(()=>reject(new Error(label+' timed out')),15000))]);}finally{clearTimeout(timer);}};
 test('MCP wire cancellation and stdin EOF both wait for real native cancellation',async t=>{

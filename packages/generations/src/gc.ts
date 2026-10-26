@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {Catalog,canonicalJSON,digest} from '@dsearch/catalog';
 import {DsearchError} from '@dsearch/contracts';
 import {atomicFile} from './seal.js';
+import {canResumeBuild} from './checkpoint.js';
 import {generationPins,claimGenerationDeletion,beginMaintenance} from './pins.js';
 type Policy={keep_retired:number;min_age_seconds:number};
 export type GCPreview={plan_id:string;policy:Policy;candidates:{generation_id:string;bytes:number;state:string;created_at:string;documents:number;passages:number}[];protected:{generation_id:string;reasons:string[]}[]};
@@ -30,8 +31,8 @@ export class GenerationGC{
   for(const row of rows){const id=String(row.generation_id),reasons=generationPins(state,id).map(reason=>'lease:'+reason);
    if(row.directory_path!==join(state.root,'generations',id)||!validId(id))throw new DsearchError('SCOPE_DENIED');
    if(active?.generation_id===id||row.state==='active')reasons.push('active');if(['building','validating'].includes(String(row.state)))reasons.push('build');if(row.state==='ready')reasons.push('prepared_candidate');if(retained.has(id))reasons.push('retention');if(backups.has(id))reasons.push('backup');
-   const job=state.db.prepare('SELECT state,cursor_json FROM jobs WHERE generation_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(id);
-   if(job&&['failed','cancelled','obsolete','queued','running'].includes(String(job.state))&&JSON.parse(String(job.cursor_json)).checkpoint)reasons.push('resume_checkpoint');
+   const job=state.db.prepare('SELECT job_id,state,cursor_json FROM jobs WHERE generation_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(id);
+   if(job&&(canResumeBuild(state,String(job.job_id))||['queued','running'].includes(String(job.state))&&JSON.parse(String(job.cursor_json)).checkpoint))reasons.push('resume_checkpoint');
    if(state.db.prepare('SELECT 1 FROM evaluation_runs WHERE generation_id=? LIMIT 1').get(id))reasons.push('evaluation');
    if(Date.now()-Date.parse(String(row.created_at))<policy.min_age_seconds*1000)reasons.push('minimum_age');
    if(reasons.length){protectedRows.push({generation_id:id,reasons});continue;}
@@ -51,7 +52,7 @@ export class GenerationGC{
     await this.options.fault?.('gc-after-rename');if(signal?.aborted)throw new DsearchError('CANCELLED');
     state.transaction(()=>{
      if(state.db.prepare('SELECT 1 FROM active_slot WHERE generation_id=?').get(id)||generationPins(state,id).length)throw new DsearchError('BUSY');
-     state.db.prepare('DELETE FROM passages WHERE generation_id=?').run(id);state.db.prepare('DELETE FROM generation_documents WHERE generation_id=?').run(id);state.db.prepare("UPDATE jobs SET generation_id=NULL,cursor_json='{}' WHERE generation_id=?").run(id);state.db.prepare('DELETE FROM generations WHERE generation_id=?').run(id);
+     state.db.prepare('DELETE FROM passages WHERE generation_id=?').run(id);state.db.prepare('DELETE FROM generation_documents WHERE generation_id=?').run(id);for(const job of state.db.prepare('SELECT job_id,cursor_json FROM jobs WHERE generation_id=?').all(id)){const cursor=JSON.parse(String(job.cursor_json));state.db.prepare('UPDATE jobs SET generation_id=NULL,cursor_json=? WHERE job_id=?').run(canonicalJSON(cursor.origin==='automatic'?{origin:'automatic'}:{}),String(job.job_id));}state.db.prepare('DELETE FROM generations WHERE generation_id=?').run(id);
     });
     await this.options.fault?.('gc-after-state-commit');if(exists)await rm(trash,{recursive:true});await rm(file);await syncDirectory(join(state.root,".maintenance"));await syncDirectory(join(state.root,"generations",".trash"));removed.push(id);bytes+=candidate.bytes;
    }catch(error){await reconcileGC(this.catalog);throw error;}finally{release();}

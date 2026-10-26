@@ -11,7 +11,7 @@ import type {SourceInput} from './reuse.js';
 export type BuildPlan={schema_version:1;generation_id:string;profile_fp:string;source_seq:number;expected_epoch:number;publish:boolean;engine:OpenEngine;inputs:SourceInput[];coverage:GenerationDocument[];mappings:IndexedPassage[];files:string[];reused_documents:number};
 type Entry={path:string;bytes:number;sha256:string};
 type Checkpoint={schema_version:1;generation_id:string;profile_fp:string;source_seq:number;expected_epoch:number;database:string;files:Entry[];completed:number};
-export type CheckpointCursor={checkpoint:string;sha256:string;resource_retries?:number;max_documents?:number;failed_native_requests?:number;embedding_call_count_incomplete?:number};
+export type CheckpointCursor={checkpoint:string;sha256:string;origin?:'automatic';source_seq?:number;resource_retries?:number;max_documents?:number;failed_native_requests?:number;embedding_call_count_incomplete?:number};
 const cursorValid=(c:CheckpointCursor)=>!!c&&/^\.checkpoints\/[a-f0-9-]+\.json$/.test(c.checkpoint)&&/^[a-f0-9]{64}$/.test(c.sha256);
 async function entry(root:string,path:string):Promise<Entry>{
  const file=join(root,path);if(!within(root,file)||await realpath(file)!==file)throw new DsearchError('SCOPE_DENIED');
@@ -30,6 +30,11 @@ export async function loadCheckpoint(root:string,cursor:CheckpointCursor):Promis
   if(plan.files.some(path=>!checkpoint.files.some(f=>f.path===path)))throw new Error('Missing projection');
   return {plan,checkpoint};
  }catch(error){if(error instanceof DsearchError&&error.code==='SCOPE_DENIED')throw error;throw new DsearchError('COMPATIBILITY_FAILED');}
+}
+export function canResumeBuild(state:StateStore,jobId:string,profiles?:ReadonlySet<string>):boolean{
+ const row=state.db.prepare('SELECT j.state,j.cursor_json,g.state AS generation_state,g.source_seq,g.profile_fp,(SELECT job_id FROM jobs WHERE generation_id=j.generation_id ORDER BY updated_at DESC,rowid DESC LIMIT 1) AS latest FROM jobs j JOIN generations g USING(generation_id) WHERE j.job_id=?').get(jobId);
+ if(!row||!['failed','cancelled','obsolete'].includes(String(row.state))||row.generation_state!=='invalid'||row.source_seq!==state.sourceSeq||row.latest!==jobId||(profiles&&!profiles.has(String(row.profile_fp))))return false;
+ try{const cursor=JSON.parse(String(row.cursor_json));return cursorValid(cursor)&&(cursor.source_seq===undefined||cursor.source_seq===state.sourceSeq);}catch{return false;}
 }
 export class BuildCheckpoints{
  private files:Entry[]=[];
@@ -50,7 +55,7 @@ export class BuildCheckpoints{
   await atomicFile(join(this.root,checkpoint),canonicalJSON(value)+'\n');
   const persisted=JSON.parse(String(this.state.db.prepare('SELECT cursor_json FROM jobs WHERE job_id=?').get(this.jobId)!.cursor_json));
   const counters=Object.fromEntries(['resource_retries','max_documents','failed_native_requests','embedding_call_count_incomplete'].filter(key=>Number.isSafeInteger(persisted[key])&&persisted[key]>=0).map(key=>[key,persisted[key]]));
-  const cursor={...counters,checkpoint,sha256:await fileDigest(join(this.root,checkpoint))};
+  const cursor={...(persisted.origin==='automatic'?{origin:'automatic' as const}:{}),...counters,source_seq:this.plan.source_seq,checkpoint,sha256:await fileDigest(join(this.root,checkpoint))};
   this.state.db.prepare('UPDATE jobs SET cursor_json=?,updated_at=? WHERE job_id=?').run(canonicalJSON(cursor),new Date().toISOString(),this.jobId);
   // The state pointer is durable before obsolete snapshots are removed. An interrupted removal is harmless.
   const prior=this.previous;this.previous=cursor;

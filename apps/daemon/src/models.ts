@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile, mkdir, lstat, realpath, open, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DsearchError } from '@dsearch/contracts';
+import {canonicalJSON,digest} from '@dsearch/catalog';
 import { ModelInfo } from '@dsearch/contracts/control';
 import { verifyModel } from '@dsearch/runtime';
 type Model = { role: 'embed' | 'rerank' | 'reference'; repository: string; revision: string; filename: string; sha256: string; bytes: number };
@@ -24,6 +25,11 @@ export class ModelManager {
       const state = !info ? 'missing' : !info.isFile() || info.isSymbolicLink() || info.size !== model.bytes ? 'invalid' : unchanged ? checked.state : 'unverified';
       return ModelInfo.parse({ ...model, state, verified_at: unchanged ? checked.at : null, error_code: state === 'missing' ? 'MODEL_NOT_INSTALLED' : state === 'invalid' ? 'MODEL_UNAVAILABLE' : null });
     }));
+  }
+  async availability(role: string) {
+    const model=(await this.list()).find(m=>m.role===role);if(!model)throw new DsearchError('COMPATIBILITY_FAILED');
+    const info=await lstat(join(this.root,model.filename)).catch((error:NodeJS.ErrnoException)=>{if(error.code!=='ENOENT')throw error;return undefined;});
+    return {ready:['verified','unverified'].includes(model.state),fingerprint:digest(canonicalJSON([model.sha256,model.state,info?this.signature(info):null])),error:model.error_code};
   }
   async check(roles: string[], signal: AbortSignal, progress: Progress) {
     try { await this.safeRoot(); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new DsearchError('MODEL_NOT_INSTALLED');throw e; }let completed = 0;

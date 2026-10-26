@@ -4,7 +4,7 @@ import {mkdtemp,mkdir,writeFile,readFile,rm,link} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {ReaderPool,SourceSearch} from '../../packages/search/dist/index.js';
 import {SearchRequest} from '../../packages/contracts/dist/index.js';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 const root=resolve(import.meta.dirname,'../..'),sleep=ms=>new Promise(r=>setTimeout(r,ms));
 test('actual product hybrid, rerank, supplemental evidence, related/compare, model fallback and cancellation',async t=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/p4-')),sources=join(folder,'source'),models=join(folder,'models');await mkdir(sources);await mkdir(models);

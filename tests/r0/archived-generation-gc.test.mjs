@@ -1,0 +1,16 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,rm,access} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
+import {GenerationBuilder,createAlphaProfile,BackupStore,GenerationGC,readBackup,verifySeal} from '../../packages/generations/dist/index.js';
+import {restoreBackup} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
+const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-recovery'),modelRoot=join(root,'.local/models');
+test('verified self-contained archives restore and serve evidence after redundant raw generations are collected',async()=>{
+ await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/archive-gc-')),source=join(folder,'source'),target=join(folder,'restored');await mkdir(source);await writeFile(join(source,'guide.md'),'# Project guide\n\nRecord the owner before the milestone review.');const state=await StateStore.open(join(folder,'data')),catalog=new Catalog(state);let app;
+ try{
+  const collection=await catalog.addCollection({name:'Projects',root:source}),options={engineRoot,modelRoot,profile:(await createAlphaProfile(engineRoot)).manifest,embedRole:'embed'},first=await new GenerationBuilder(catalog,options).start().completion,backup=await new BackupStore(catalog).create(),next=await new GenerationBuilder(catalog,options).start({full:true}).completion,store=new BackupStore(catalog),collector=new GenerationGC(catalog,{backupReferences:()=>store.generationReferences()}),policy={keep_retired:0,min_age_seconds:0},preview=await collector.preview(policy);assert.ok(preview.candidates.some(g=>g.generation_id===first.generation_id));assert.ok(preview.protected.some(g=>g.generation_id===next.generation_id&&g.reasons.includes('active')));await collector.apply(preview.plan_id,policy);await assert.rejects(access(join(state.root,'generations',first.generation_id)));await readBackup(backup.path);await verifySeal(join(backup.path,'generations',first.generation_id),first.manifest_sha256);
+  const plan=await restoreBackup({backupPath:backup.path,targetRoot:target});assert.equal(plan.rebuild_required,false);await restoreBackup({backupPath:backup.path,targetRoot:target,apply:true,planId:plan.plan_id});app=await createApplication({dataRoot:target,engineRoot,modelRoot});assert.equal(app.status().needs_rebuild,false);const accepted=app.sessions.createKeyword({query:'milestone',purpose:'find',mode:'lexical',rerank:false,collections:[collection.collection_id]});let result;for(let i=0;i<1000;i++){result=app.sessions.get(accepted.search_id);if(['completed','failed'].includes(result.state))break;await new Promise(r=>setTimeout(r,10));}assert.equal(result.state,'completed',JSON.stringify(result));assert.equal(result.generation_id,first.generation_id);assert.equal(result.results.length,1);const document=result.results[0],read=await app.catalog.read({doc_id:document.doc_id,revision_id:document.revision_id,locator:document.evidence[0].locator,context_before_lines:0,context_after_lines:0});assert.ok(read.text.includes('milestone review'));
+ }finally{await app?.close();state.close();await rm(folder,{recursive:true,force:true});}
+});

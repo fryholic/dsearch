@@ -11,7 +11,7 @@ import { QmdWorker, type EngineResponse, type OpenEngine } from "@dsearch/engine
 import { atomicFile, sealFiles, verifySeal } from "./seal.js";
 import { snapshotForReuse, type SourceInput } from './reuse.js';
 import { pinGeneration, maintenanceActive } from './pins.js';
-import { BuildCheckpoints, loadCheckpoint, type BuildPlan, type CheckpointCursor } from './checkpoint.js';
+import { BuildCheckpoints, loadCheckpoint, canResumeBuild, type BuildPlan, type CheckpointCursor } from './checkpoint.js';
 export type GenerationDocument = { doc_id: string; revision_id: string | null; collection_id: string; state: "included" | "partial" | "lexical_only" | "excluded" | "pending" | "failed"; reason: string | null; coverage: CoverageBlock[] };
 export type IndexedPassage = Omit<Passage, "text"> & { engine_collection: string; engine_relative_path: string };
 export type BuildResult = { generation_id: string; epoch: number; manifest_sha256: string; coverage: GenerationDocument[]; published: boolean };
@@ -28,7 +28,7 @@ export class GenerationBuilder {
   getJob(id: string) {
     const row = this.catalog.state.db.prepare("SELECT job_id,kind,generation_id,state,phase,cursor_json,progress_json,cancel_requested,error_code,updated_at FROM jobs WHERE job_id=?").get(id);
     if (!row) throw new DsearchError("NOT_FOUND");
-    return JobInfo.parse({ job_id: row.job_id, kind: row.kind, generation_id: row.generation_id, state: row.cancel_requested && ["queued", "running"].includes(String(row.state)) ? "cancel_requested" : row.state, phase: row.phase, progress: JSON.parse(String(row.progress_json)), error_code: row.error_code, retryable: ["failed","obsolete","cancelled"].includes(String(row.state)) && !!JSON.parse(String(row.cursor_json)).checkpoint, updated_at: row.updated_at });
+    return JobInfo.parse({ job_id: row.job_id, origin:JSON.parse(String(row.cursor_json)).origin??'manual', kind: row.kind, generation_id: row.generation_id, state: row.cancel_requested && ["queued", "running"].includes(String(row.state)) ? "cancel_requested" : row.state, phase: row.phase, progress: JSON.parse(String(row.progress_json)), error_code: row.error_code, retryable: canResumeBuild(this.catalog.state,id,new Set([digest(canonicalJSON(this.options.profile))])), updated_at: row.updated_at });
   }
   cancel(id: string): void {
     this.getJob(id);
@@ -40,14 +40,15 @@ export class GenerationBuilder {
     if (this.active || maintenanceActive(this.catalog.state)) throw new DsearchError("BUSY");
     const state = this.catalog.state, profile = this.options.profile, fp = digest(canonicalJSON(profile)), jobId = randomUUID(), genId = randomUUID();
     let targetGenId: string = genId, resumeCursor: CheckpointCursor | undefined;
-    const prior = options.resume ? state.db.prepare("SELECT j.*,g.profile_fp,g.directory_path,g.state AS generation_state FROM jobs j JOIN generations g USING(generation_id) WHERE j.job_id=?").get(options.resume) : undefined;
+    const prior = options.resume ? state.db.prepare("SELECT j.*,g.profile_fp,g.source_seq,g.directory_path,g.state AS generation_state FROM jobs j JOIN generations g USING(generation_id) WHERE j.job_id=?").get(options.resume) : undefined;
     if (options.resume) {
       if (!prior) throw new DsearchError("NOT_FOUND");
       if (!['failed','cancelled','obsolete'].includes(String(prior.state)) || prior.generation_state !== 'invalid' || prior.profile_fp !== fp) throw new DsearchError("COMPATIBILITY_FAILED");
       const latest = state.db.prepare('SELECT job_id FROM jobs WHERE generation_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(String(prior.generation_id));
-      if (latest?.job_id !== options.resume) throw new DsearchError("STALE_EPOCH");
+      if (latest?.job_id !== options.resume || prior.source_seq!==state.sourceSeq) throw new DsearchError("STALE_EPOCH");
       targetGenId = String(prior.generation_id);resumeCursor = JSON.parse(String(prior.cursor_json));
       if (!resumeCursor?.checkpoint) throw new DsearchError("INVALID_REQUEST");
+      if(resumeCursor.source_seq!==undefined&&resumeCursor.source_seq!==state.sourceSeq)throw new DsearchError('STALE_EPOCH');
       if (prior.directory_path !== join(state.root,'generations',targetGenId)) throw new DsearchError('SCOPE_DENIED');
     }
     const directory = join(state.root, "generations", targetGenId), created = timestamp();
@@ -109,6 +110,7 @@ export class GenerationBuilder {
       const restored = resumeCursor ? await loadCheckpoint(directory,resumeCursor) : undefined;
       if (restored) {
         const plan=restored.plan;
+        state.db.prepare('UPDATE jobs SET cursor_json=? WHERE job_id=?').run(canonicalJSON({...resumeCursor,source_seq:plan.source_seq}),jobId);
         if(plan.profile_fp!==fp||plan.generation_id!==genId||plan.source_seq!==sourceSeq||plan.expected_epoch!==expectedEpoch||canonicalJSON(plan.engine)!==canonicalJSON(engine)||canonicalJSON(plan.inputs.map(i=>[i.doc_id,i.revision_id,i.relative_path,i.scope_fp]).sort())!==canonicalJSON(docs.filter(d=>d.eligibility==='eligible'&&d.latest_revision_id).map(d=>[d.doc_id,d.latest_revision_id,d.relative_path,scopes[d.collection_id]]).sort()))throw new DsearchError('STALE_EPOCH');
         for(const input of plan.inputs)await this.catalog.readDocument(input.doc_id,input.revision_id);
         await rm(engine.dbPath+'-wal',{force:true});await rm(engine.dbPath+'-shm',{force:true});await atomicFile(engine.dbPath,await readFile(join(directory,restored.checkpoint.database)));

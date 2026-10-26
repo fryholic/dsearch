@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
-import {createApplication} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 import {SourceSearch} from '../../packages/search/dist/index.js';
 import {SearchRequest} from '../../packages/contracts/dist/index.js';
 import {spawn} from 'node:child_process';

@@ -1,14 +1,15 @@
+import {DsearchError} from '@dsearch/contracts';
 import { useEffect, useState, type FormEvent } from 'react';
-import { Preferences, CollectionPreview, CollectionPatch, type CollectionInfo } from '@dsearch/contracts/control';
+import { Preferences, CollectionPreview, CollectionPatch, type AppStatus, type CollectionInfo } from '@dsearch/contracts/control';
 import { api, message } from '../api.js';
 import { ScopeFields, scopeDraft, scopeRules, eligibilityLabel, reasonLabel } from './scope-fields.js';
-import { Button, Notice, Empty } from '../components.js';
+import { Button, Notice, Empty, syncLabel } from '../components.js';
 
 export function downloadJSON(data: unknown, name: string) {
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2) + '\n'], { type: 'application/json' }));
   const anchor = document.createElement('a');anchor.href = url;anchor.download = name;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-export function Settings({ value, onSaved }: { value: Preferences; onSaved: (value: Preferences) => void }) {
+export function Settings({ value, onSaved, status }: { value: Preferences; onSaved: (value: Preferences) => void; status?: AppStatus }) {
   const [draft, setDraft] = useState(value), [saving, setSaving] = useState(false), [error, setError] = useState(''), [saved, setSaved] = useState(false);
   useEffect(() => setDraft(value), [value]);
   const submit = async (event: FormEvent) => { event.preventDefault();setSaving(true);setSaved(false);setError('');
@@ -16,6 +17,7 @@ export function Settings({ value, onSaved }: { value: Preferences; onSaved: (val
   };
   return <form className="management-form" onSubmit={submit}>
     {error ? <Notice error>{error}</Notice> : null}
+    <section className="management-card"><h2>자동 반영</h2><label className="checkbox"><input type="checkbox" checked={draft.auto_sync} onChange={e=>setDraft({...draft,auto_sync:e.target.checked})}/>문서 변경을 자동으로 반영</label><p>등록한 폴더에서 저장이 안정되면 검색 자료를 갱신해요. 연속 저장은 묶어서 처리하며 원문은 수정하지 않아요.</p>{status?<p role="status">현재 상태 · {syncLabel(status.synchronization.state)}</p>:null}{status?.synchronization.error_code?<p className="hint">{message(new DsearchError(status.synchronization.error_code))}</p>:null}<p className="hint">사용하려는 모델은 먼저 준비해 주세요. 변경 감지 때문에 모델을 자동 다운로드하지 않아요. 설정을 저장하면 적용돼요.</p></section>
     <section className="management-card"><h2>화면</h2><p>흰 배경과 세이지 색상을 기본으로 사용해요.</p><fieldset><legend>테마</legend><div className="theme-choices">{([['system', '시스템'], ['light', '라이트'], ['dark', '다크']] as const).map(([id, label]) => <label key={id}><input type="radio" name="theme" value={id} checked={draft.theme === id} onChange={() => setDraft({ ...draft, theme: id })}/>{label}</label>)}</div></fieldset></section>
     <section className="management-card"><h2>검색 기본값</h2><label htmlFor="default-mode">검색 방식</label><select id="default-mode" value={draft.search.mode} onChange={e => setDraft({ ...draft, search: { ...draft.search, mode: e.target.value as 'lexical' | 'hybrid' } })}><option value="hybrid">의미 함께</option><option value="lexical">키워드</option></select>
       <label className="checkbox"><input type="checkbox" checked={draft.search.rerank} onChange={e => setDraft({ ...draft, search: { ...draft.search, rerank: e.target.checked } })}/>리랭킹 사용</label><p className="hint">검색 후보의 관련성을 다시 검토해 순서를 조정해요. 추가 처리 시간이 필요하며 기본값은 꺼짐이에요.</p>
@@ -30,7 +32,7 @@ export function Diagnostics() {
   const load = async () => { setLoading(true);setError('');try { setData(await api('POST', '/v1/diagnostics', {})); } catch (e) { setError(message(e)); } finally { setLoading(false); } };
   useEffect(() => { void load(); }, []);
   return <section className="management-form">{error ? <Notice error>{error}</Notice> : null}<div className="management-actions"><Button onClick={() => void load()} disabled={loading}>{loading ? '확인 중' : '상태 다시 확인'}</Button><Button disabled={!data} onClick={() => downloadJSON(data, 'dsearch-diagnostics.json')}>진단 내보내기</Button></div><p className="hint">진단에는 원문·검색어·컬렉션 이름과 경로·인증 정보를 포함하지 않아요.</p>
-    {data ? <><section className="management-card"><h2>검색 준비 상태</h2><dl><dt>활성 세대</dt><dd className="path">{data.generation?.generation_id ?? '아직 없음'}</dd><dt>자료 갱신</dt><dd>{data.needs_rebuild ? '수동 색인이 필요해요' : '현재 색인을 사용할 수 있어요'}</dd><dt>폴더 접근</dt><dd>{data.scope_incomplete ? '확인하지 못한 범위가 있어요' : '확인된 불완전 범위가 없어요'}</dd><dt>모델 메모리</dt><dd>{data.execution.resident_workers}개 실행 프로세스</dd><dt>대기 요청</dt><dd>{data.execution.queued_requests}개</dd></dl></section><section className="management-card"><h2>문서 처리 상태</h2>{Object.keys(data.coverage).length ? Object.entries(data.coverage).map(([key, value]) => <p key={key}>{key}: {String(value)}개</p>) : <Empty title="색인이 아직 없어요">컬렉션에서 수동 색인을 시작하세요.</Empty>}</section><details className="management-card"><summary>진단 원자료</summary><pre className="raw-source">{JSON.stringify(data, null, 2)}</pre></details></> : null}
+    {data ? <><section className="management-card"><h2>검색 준비 상태</h2><dl><dt>활성 세대</dt><dd className="path">{data.generation?.generation_id ?? '아직 없음'}</dd><dt>자료 갱신</dt><dd>{data.needs_rebuild ? data.synchronization?.enabled ? syncLabel(data.synchronization.state) : '수동 색인이 필요해요' : '현재 색인을 사용할 수 있어요'}</dd><dt>폴더 접근</dt><dd>{data.scope_incomplete ? '확인하지 못한 범위가 있어요' : '확인된 불완전 범위가 없어요'}</dd><dt>모델 메모리</dt><dd>{data.execution.resident_workers}개 실행 프로세스</dd><dt>대기 요청</dt><dd>{data.execution.queued_requests}개</dd></dl></section><section className="management-card"><h2>문서 처리 상태</h2>{Object.keys(data.coverage).length ? Object.entries(data.coverage).map(([key, value]) => <p key={key}>{key}: {String(value)}개</p>) : <Empty title="색인이 아직 없어요">컬렉션에서 수동 색인을 시작하세요.</Empty>}</section><details className="management-card"><summary>진단 원자료</summary><pre className="raw-source">{JSON.stringify(data, null, 2)}</pre></details></> : null}
   </section>;
 }
 export function CollectionDetails({ collection, onUpdated }: { collection: CollectionInfo; onUpdated: () => Promise<void> }) {

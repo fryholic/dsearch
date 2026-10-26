@@ -2,13 +2,13 @@ import {backup,DatabaseSync} from 'node:sqlite';
 import {readFile,mkdir,open,lstat,realpath,readdir,rename,rm,copyFile,chmod} from 'node:fs/promises';
 import {join,dirname} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {Catalog,canonicalJSON,within} from '@dsearch/catalog';
-import {DsearchError} from '@dsearch/contracts';
+import {Catalog,canonicalJSON,digest,within} from '@dsearch/catalog';
+import {DsearchError,ProfileManifest} from '@dsearch/contracts';
 import {fileDigest} from '@dsearch/runtime';
 import {atomicFile,verifySeal} from './seal.js';
 import {beginMaintenance} from './pins.js';
 export type BackupEntry={path:string;bytes:number;sha256:string};
-export type BackupManifest={schema_version:1;backup_id:string;created_at:string;source_data_root:string;state_schema:number;source_seq:number;generations:{generation_id:string;state:string;manifest_sha256:string|null}[];files:BackupEntry[]};
+export type BackupManifest={schema_version:1;backup_id:string;created_at:string;source_data_root:string;state_schema:number;source_seq:number;generation_storage?:'self-contained-v1';generations:{generation_id:string;state:string;manifest_sha256:string|null}[];files:BackupEntry[]};
 export type BackupInfo={backup_id:string;created_at:string;path:string;sha256:string;generations:number;bytes:number};
 export async function privateDirectory(path:string){await mkdir(path,{recursive:true,mode:0o700});const info=await lstat(path);if(!info.isDirectory()||info.isSymbolicLink()||(info.mode&0o077)||await realpath(path)!==path)throw new DsearchError('SCOPE_DENIED');}
 export async function durableFile(path:string){const handle=await open(path,'r');try{await handle.sync();}finally{await handle.close();}}
@@ -38,6 +38,7 @@ export async function readBackup(folder:string,full=true):Promise<{manifest:Back
   const manifest=JSON.parse(await readFile(file,'utf8')) as BackupManifest;
   if(manifest.schema_version!==1||!/^backup-[a-f0-9-]{36}$/.test(manifest.backup_id)||!Array.isArray(manifest.files)||!Array.isArray(manifest.generations)||!manifest.files.some(f=>f.path==='state.sqlite'))throw new Error('Manifest schema');
   if(!Number.isSafeInteger(manifest.state_schema)||manifest.state_schema<1||!Number.isSafeInteger(manifest.source_seq)||manifest.source_seq<0||manifest.generations.some(g=>!/^([a-f0-9-]{36})$/.test(g.generation_id))||manifest.files.some(f=>!Number.isSafeInteger(f.bytes)||f.bytes<0||typeof f.sha256!=='string'||!/^([a-f0-9]{64})$/.test(f.sha256)))throw new Error('Manifest values');
+  if(manifest.generation_storage!==undefined&&manifest.generation_storage!=='self-contained-v1')throw new Error('Backup storage contract');
   if(new Set(manifest.files.map(f=>f.path)).size!==manifest.files.length)throw new Error('Duplicate paths');
   for(const item of manifest.files){
    if(typeof item.path!=='string'||!within(root,join(root,item.path))||item.path.startsWith('/')||item.path.includes('..'))throw new Error('Manifest path');
@@ -48,6 +49,32 @@ export async function readBackup(folder:string,full=true):Promise<{manifest:Back
   return {manifest,sha256};
  }catch(error){if(error instanceof DsearchError&&error.code==='SCOPE_DENIED')throw error;throw new DsearchError('COMPATIBILITY_FAILED');}
 }
+/** Prove that restoring this archive needs no original generation directory. */
+async function verifyArchivedGenerations(root:string,manifest:BackupManifest):Promise<void>{
+ const db=new DatabaseSync(join(root,'state.sqlite'),{readOnly:true});
+ try{
+  if(Number(db.prepare('PRAGMA user_version').get()!.user_version)!==manifest.state_schema||db.prepare('PRAGMA integrity_check').get()?.integrity_check!=='ok'||db.prepare('PRAGMA foreign_key_check').all().length)throw new DsearchError('COMPATIBILITY_FAILED');
+  const rows=db.prepare('SELECT * FROM generations ORDER BY generation_id').all();
+  if(canonicalJSON(rows.map(r=>({generation_id:r.generation_id,state:r.state,manifest_sha256:r.manifest_sha256})))!==canonicalJSON([...manifest.generations].sort((a,b)=>a.generation_id.localeCompare(b.generation_id))))throw new DsearchError('COMPATIBILITY_FAILED');
+  const entries=new Map(manifest.files.map(file=>[file.path,file]));
+  const included=(prefix:string,file:BackupEntry)=>{const archived=entries.get(prefix+file.path);return !!archived&&archived.bytes===file.bytes&&archived.sha256===file.sha256;};
+  for(const row of rows){
+   const id=String(row.generation_id),prefix='generations/'+id+'/',directory=join(root,'generations',id);
+   if(row.directory_path!==join(manifest.source_data_root,'generations',id))throw new DsearchError('COMPATIBILITY_FAILED');
+   if(['active','ready','retired'].includes(String(row.state))){
+    const sealed=await verifySeal(directory,String(row.manifest_sha256)),profile=ProfileManifest.parse(JSON.parse(await readFile(join(directory,'profile.json'),'utf8')));if(digest(canonicalJSON(profile))!==row.profile_fp)throw new DsearchError('COMPATIBILITY_FAILED');
+    if(sealed.generation_id!==id||sealed.profile_fp!==row.profile_fp||sealed.source_seq!==row.source_seq||entries.get(prefix+'manifest.json')?.sha256!==row.manifest_sha256||sealed.files.some(file=>!included(prefix,file)))throw new DsearchError('COMPATIBILITY_FAILED');
+   }else{
+    const latest=db.prepare('SELECT cursor_json FROM jobs WHERE generation_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 1').get(id),cursor=latest?JSON.parse(String(latest.cursor_json)):{};
+    if(cursor.checkpoint){
+     if(!/^\.checkpoints\/[a-f0-9-]+\.json$/.test(cursor.checkpoint)||entries.get(prefix+cursor.checkpoint)?.sha256!==cursor.sha256)throw new DsearchError('COMPATIBILITY_FAILED');
+     const checkpoint=JSON.parse(await readFile(join(directory,cursor.checkpoint),'utf8')),plan=JSON.parse(await readFile(join(directory,'build-plan.json'),'utf8'));if(plan.schema_version!==1||plan.generation_id!==id||plan.profile_fp!==row.profile_fp||plan.source_seq!==checkpoint.source_seq||!Array.isArray(plan.files)||plan.files.some((path:string)=>!entries.has(prefix+path)))throw new DsearchError('COMPATIBILITY_FAILED');
+     if(checkpoint.schema_version!==1||checkpoint.generation_id!==id||checkpoint.profile_fp!==row.profile_fp||!Array.isArray(checkpoint.files)||!/^\.checkpoints\/[a-f0-9-]+\.sqlite$/.test(checkpoint.database)||checkpoint.files.some((file:BackupEntry)=>!included(prefix,file))||!checkpoint.files.some((file:BackupEntry)=>file.path===checkpoint.database)||!checkpoint.files.some((file:BackupEntry)=>file.path==='build-plan.json'))throw new DsearchError('COMPATIBILITY_FAILED');
+    }
+   }
+  }
+ }finally{db.close();}
+}
 export class BackupStore{
  constructor(readonly catalog:Catalog,readonly options:{keep?:number;protectedIds?:string[];fault?:(phase:string)=>void|Promise<void>}={}){}
  get root(){return join(this.catalog.state.root,'backups');}
@@ -57,7 +84,7 @@ export class BackupStore{
   return result.sort((a,b)=>b.created_at.localeCompare(a.created_at));
  }
  async generationReferences():Promise<string[]>{
-  const ids=new Set<string>();for(const backup of await this.list()){const {manifest}=await readBackup(backup.path,false);for(const generation of manifest.generations)ids.add(generation.generation_id);}
+  const ids=new Set<string>();for(const backup of await this.list()){const {manifest}=await readBackup(backup.path,false);if(manifest.generation_storage==='self-contained-v1'){try{await readBackup(backup.path);await verifyArchivedGenerations(backup.path,manifest);continue;}catch{/* Unverified or damaged archives conservatively retain their original files. */}}for(const generation of manifest.generations)ids.add(generation.generation_id);}
   // Migration snapshots are intentionally retained and may refer to older generation directories.
   for(const name of await readdir(this.root)){if(!/^state-before-[a-zA-Z0-9-]+\.sqlite$/.test(name))continue;const path=join(this.root,name);await fileEntry(this.root,name);const db=new DatabaseSync(path,{readOnly:true});try{for(const row of db.prepare('SELECT generation_id FROM generations').all())ids.add(String(row.generation_id));}finally{db.close();}}
   return [...ids];
@@ -94,7 +121,7 @@ export class BackupStore{
     await copyBackupTree(from,to,'generations/'+generation.generation_id,files,signal);
    }
    const preferences=join(this.catalog.state.root,'preferences.json');if(await lstat(preferences).then(()=>true,(e:NodeJS.ErrnoException)=>{if(e.code!=='ENOENT')throw e;return false;})){await fileEntry(this.catalog.state.root,'preferences.json');await atomicFile(join(folder,'preferences.json'),await readFile(preferences));files.push(await fileEntry(folder,'preferences.json'));}
-   const manifest:BackupManifest={schema_version:1,backup_id:id,created_at:new Date().toISOString(),source_data_root:this.catalog.state.root,state_schema,source_seq,generations,files:files.sort((a,b)=>a.path.localeCompare(b.path))};
+   const manifest:BackupManifest={schema_version:1,backup_id:id,created_at:new Date().toISOString(),source_data_root:this.catalog.state.root,state_schema,source_seq,generation_storage:'self-contained-v1',generations,files:files.sort((a,b)=>a.path.localeCompare(b.path))};
    await atomicFile(join(folder,'manifest.json'),canonicalJSON(manifest)+'\n');await atomicFile(join(folder,'manifest.sha256'),await fileDigest(join(folder,'manifest.json'))+'\n');await readBackup(folder);await this.options.fault?.('backup-before-publish');if(signal?.aborted)throw new DsearchError('CANCELLED');
    await rename(folder,destination);await durableFile(this.root);committed=true;await this.options.fault?.('backup-after-publish');
    const list=(await this.list()).sort((a,b)=>a.backup_id===id?-1:b.backup_id===id?1:b.created_at.localeCompare(a.created_at));

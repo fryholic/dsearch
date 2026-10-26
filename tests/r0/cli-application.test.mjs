@@ -9,6 +9,7 @@ test('initial CLI owns lifecycle and shares actual HTTP IDs, revisions, locators
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/cli-')),data=join(folder,'data'),sources=join(folder,'source');await mkdir(sources);await writeFile(join(sources,'example.md'),'# ECDSA\n\n서명 검증과 canonical encoding.\n\n정확한 [a-z]+ 문자열.');
  try{
   const started=await cli(data,['serve','start']);assert.equal(started.code,0);const again=await cli(data,['serve','start']);assert.equal(again.packet.data.instance_id,started.packet.data.instance_id);
+  const manual=await cli(data,['settings','set','--no-auto-sync']);assert.equal(manual.code,0);assert.equal(manual.packet.data.auto_sync,false);
   const added=await cli(data,['collection','add',sources,'--name','CLI 문서']);assert.equal(added.code,0);const id=added.packet.data.collection_id;
   const token=(await readFile(join(data,'credentials/device-token'),'utf8')).trim(),runtime=JSON.parse(await readFile(join(data,'runtime.json'),'utf8'));
   const http=async(method,path,value)=>{const response=await fetch(runtime.url+path,{method,headers:{authorization:'Bearer '+token,'content-type':'application/json'},...(value?{body:JSON.stringify(value)}:{})});return response.json();};
@@ -21,7 +22,7 @@ test('initial CLI owns lifecycle and shares actual HTTP IDs, revisions, locators
   const tuned=await cli(data,['settings','set','--candidate-limit','12','--allow-degraded']);assert.equal(tuned.code,0);assert.equal(tuned.packet.data.search.candidate_limit,12);assert.equal(tuned.packet.data.search.allow_degraded,true);
   const restored=await cli(data,['settings','set','--candidate-limit','40','--no-degraded']);assert.equal(restored.code,0);assert.equal(restored.packet.data.search.allow_degraded,false);
   const diagnostic=await cli(data,['doctor']);assert.equal(diagnostic.code,0);assert.ok(!JSON.stringify(diagnostic.packet.data).includes(sources));
-  const built=await cli(data,['reconcile']);assert.equal(built.code,0,built.err);assert.equal(built.packet.data.state,'succeeded');assert.ok(built.err.length);
+  const built=await cli(data,['reconcile']);assert.equal(built.code,0,built.err);assert.equal(built.packet.data.state,'succeeded');assert.equal(built.packet.data.origin,'manual');assert.ok(built.err.length);
   const reused=await cli(data,['reconcile']);assert.equal(reused.code,0,reused.err);assert.equal(reused.packet.data.progress.embedding_calls,0);assert.ok(reused.packet.data.progress.reused_documents>0);
   const full=await cli(data,['reconcile','--full']);assert.equal(full.code,0,full.err);assert.equal(full.packet.data.progress.reused_documents,0);assert.ok(full.packet.data.progress.embedding_calls>0);
   const generations=await cli(data,['generation','list']);assert.equal(generations.code,0);assert.equal(generations.packet.data[0].state,'active');

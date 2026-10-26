@@ -6,7 +6,8 @@ import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
 import {GenerationBuilder,createAlphaProfile,BackupStore,verifySeal} from '../../packages/generations/dist/index.js';
-import {restoreBackup,createApplication} from '../../apps/daemon/dist/index.js';
+import {restoreBackup} from '../../apps/daemon/dist/index.js';
+import {createApplication} from '../fixtures/application.mjs';
 import {fileDigest} from '../../packages/runtime/dist/index.js';
 const root=resolve(import.meta.dirname,'../..'),engineRoot=join(root,'.local/qmd-recovery'),modelRoot=join(root,'.local/models');
 test('SIGKILL during restore cannot turn a valid data root into an empty or mixed installation',async t=>{
