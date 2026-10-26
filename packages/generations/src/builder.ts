@@ -11,7 +11,7 @@ import { QmdWorker, type EngineResponse, type OpenEngine } from "@dsearch/engine
 import { atomicFile, sealFiles, verifySeal } from "./seal.js";
 import { snapshotForReuse, type SourceInput } from './reuse.js';
 import { pinGeneration, maintenanceActive } from './pins.js';
-import { BuildCheckpoints, loadCheckpoint, canResumeBuild, type BuildPlan, type CheckpointCursor } from './checkpoint.js';
+import { BuildCheckpoints, loadCheckpoint, canResumeBuild, automaticCursorMetadata, type AutomaticCursor, type BuildPlan, type CheckpointCursor } from './checkpoint.js';
 export type GenerationDocument = { doc_id: string; revision_id: string | null; collection_id: string; state: "included" | "partial" | "lexical_only" | "excluded" | "pending" | "failed"; reason: string | null; coverage: CoverageBlock[] };
 export type IndexedPassage = Omit<Passage, "text"> & { engine_collection: string; engine_relative_path: string };
 export type BuildResult = { generation_id: string; epoch: number; manifest_sha256: string; coverage: GenerationDocument[]; published: boolean };
@@ -35,10 +35,12 @@ export class GenerationBuilder {
     if (this.active?.handle.job_id !== id) return;
     this.catalog.state.db.prepare("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE job_id=?").run(timestamp(), id);this.active.controller.abort();
   }
-  start(options: { publish?: boolean; full?: boolean; resume?: string } = {}): BuildHandle {
+  start(options: { publish?: boolean; full?: boolean; resume?: string; automatic?: AutomaticCursor } = {}): BuildHandle {
     if (this.closing) throw new DsearchError("SERVICE_UNAVAILABLE");
     if (this.active || maintenanceActive(this.catalog.state)) throw new DsearchError("BUSY");
     const state = this.catalog.state, profile = this.options.profile, fp = digest(canonicalJSON(profile)), jobId = randomUUID(), genId = randomUUID();
+    const automatic=automaticCursorMetadata(options.automatic);
+    if(options.automatic&&(!automatic.automatic_key||automatic.automatic_source_seq!==state.sourceSeq||automatic.automatic_profile_fp!==fp||options.resume||options.publish===false))throw new DsearchError('INVALID_REQUEST');
     let targetGenId: string = genId, resumeCursor: CheckpointCursor | undefined;
     const prior = options.resume ? state.db.prepare("SELECT j.*,g.profile_fp,g.source_seq,g.directory_path,g.state AS generation_state FROM jobs j JOIN generations g USING(generation_id) WHERE j.job_id=?").get(options.resume) : undefined;
     if (options.resume) {
@@ -60,7 +62,7 @@ export class GenerationBuilder {
         state.db.prepare('DELETE FROM passages WHERE generation_id=?').run(targetGenId);state.db.prepare('DELETE FROM generation_documents WHERE generation_id=?').run(targetGenId);
         state.db.prepare("UPDATE generations SET state='building',manifest_sha256=NULL,sealed_at=NULL WHERE generation_id=?").run(targetGenId);
       } else state.db.prepare("INSERT INTO generations VALUES (?,?,?,'building',?,?,NULL,?,?,NULL)").run(genId, profile.profile_id, fp, directory, state.sourceSeq, "{}", created);
-      state.db.prepare("INSERT INTO jobs VALUES (?,?,?,?,'queued','queued','{}','{}',0,0,NULL,NULL,NULL,?)").run(jobId, digest(canonicalJSON(["full-build", targetGenId, fp, jobId])), prior ? String(prior.kind) : options.publish === false ? 'profile-build' : "full-build", targetGenId, created);
+      state.db.prepare("INSERT INTO jobs VALUES (?,?,?,?,'queued','queued',?,'{}',0,0,NULL,NULL,NULL,?)").run(jobId, digest(canonicalJSON(["full-build", targetGenId, fp, jobId])), prior ? String(prior.kind) : options.publish === false ? 'profile-build' : "full-build", targetGenId, canonicalJSON(automatic), created);
       if (resumeCursor) state.db.prepare("UPDATE jobs SET cursor_json=?,attempt=? WHERE job_id=?").run(canonicalJSON(resumeCursor),Number(prior!.attempt)+1,jobId);
     });
     const unpin=pinGeneration(state,targetGenId,"builder");

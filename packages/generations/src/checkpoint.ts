@@ -11,7 +11,18 @@ import type {SourceInput} from './reuse.js';
 export type BuildPlan={schema_version:1;generation_id:string;profile_fp:string;source_seq:number;expected_epoch:number;publish:boolean;engine:OpenEngine;inputs:SourceInput[];coverage:GenerationDocument[];mappings:IndexedPassage[];files:string[];reused_documents:number};
 type Entry={path:string;bytes:number;sha256:string};
 type Checkpoint={schema_version:1;generation_id:string;profile_fp:string;source_seq:number;expected_epoch:number;database:string;files:Entry[];completed:number};
-export type CheckpointCursor={checkpoint:string;sha256:string;origin?:'automatic';source_seq?:number;resource_retries?:number;max_documents?:number;failed_native_requests?:number;embedding_call_count_incomplete?:number};
+export type AutomaticCursor={origin?:'automatic';automatic_key?:string;automatic_source_seq?:number;automatic_profile_fp?:string;automatic_retry_allowed?:boolean};
+export function automaticCursorMetadata(value:unknown):AutomaticCursor{
+ if(!value||typeof value!=='object'||Array.isArray(value))return {};
+ const v=value as Record<string,unknown>;if(v.origin!=='automatic')return {};
+ const result:AutomaticCursor={origin:'automatic'};
+ if(typeof v.automatic_key==='string'&&/^[a-f0-9]{64}$/.test(v.automatic_key)&&typeof v.automatic_profile_fp==='string'&&/^[a-f0-9]{64}$/.test(v.automatic_profile_fp)&&Number.isSafeInteger(v.automatic_source_seq)&&Number(v.automatic_source_seq)>=0){
+  Object.assign(result,{automatic_key:v.automatic_key,automatic_source_seq:v.automatic_source_seq,automatic_profile_fp:v.automatic_profile_fp});
+  if(v.automatic_retry_allowed===true)result.automatic_retry_allowed=true;
+ }
+ return result;
+}
+export type CheckpointCursor=AutomaticCursor&{checkpoint:string;sha256:string;source_seq?:number;resource_retries?:number;max_documents?:number;failed_native_requests?:number;embedding_call_count_incomplete?:number};
 const cursorValid=(c:CheckpointCursor)=>!!c&&/^\.checkpoints\/[a-f0-9-]+\.json$/.test(c.checkpoint)&&/^[a-f0-9]{64}$/.test(c.sha256);
 async function entry(root:string,path:string):Promise<Entry>{
  const file=join(root,path);if(!within(root,file)||await realpath(file)!==file)throw new DsearchError('SCOPE_DENIED');
@@ -55,7 +66,7 @@ export class BuildCheckpoints{
   await atomicFile(join(this.root,checkpoint),canonicalJSON(value)+'\n');
   const persisted=JSON.parse(String(this.state.db.prepare('SELECT cursor_json FROM jobs WHERE job_id=?').get(this.jobId)!.cursor_json));
   const counters=Object.fromEntries(['resource_retries','max_documents','failed_native_requests','embedding_call_count_incomplete'].filter(key=>Number.isSafeInteger(persisted[key])&&persisted[key]>=0).map(key=>[key,persisted[key]]));
-  const cursor={...(persisted.origin==='automatic'?{origin:'automatic' as const}:{}),...counters,source_seq:this.plan.source_seq,checkpoint,sha256:await fileDigest(join(this.root,checkpoint))};
+  const cursor={...automaticCursorMetadata(persisted),...counters,source_seq:this.plan.source_seq,checkpoint,sha256:await fileDigest(join(this.root,checkpoint))};
   this.state.db.prepare('UPDATE jobs SET cursor_json=?,updated_at=? WHERE job_id=?').run(canonicalJSON(cursor),new Date().toISOString(),this.jobId);
   // The state pointer is durable before obsolete snapshots are removed. An interrupted removal is harmless.
   const prior=this.previous;this.previous=cursor;

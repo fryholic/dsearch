@@ -4,7 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {Catalog,canonicalJSON,digest} from '@dsearch/catalog';
 import {DsearchError} from '@dsearch/contracts';
 import {atomicFile} from './seal.js';
-import {canResumeBuild} from './checkpoint.js';
+import {canResumeBuild,automaticCursorMetadata} from './checkpoint.js';
 import {generationPins,claimGenerationDeletion,beginMaintenance} from './pins.js';
 type Policy={keep_retired:number;min_age_seconds:number};
 export type GCPreview={plan_id:string;policy:Policy;candidates:{generation_id:string;bytes:number;state:string;created_at:string;documents:number;passages:number}[];protected:{generation_id:string;reasons:string[]}[]};
@@ -52,7 +52,7 @@ export class GenerationGC{
     await this.options.fault?.('gc-after-rename');if(signal?.aborted)throw new DsearchError('CANCELLED');
     state.transaction(()=>{
      if(state.db.prepare('SELECT 1 FROM active_slot WHERE generation_id=?').get(id)||generationPins(state,id).length)throw new DsearchError('BUSY');
-     state.db.prepare('DELETE FROM passages WHERE generation_id=?').run(id);state.db.prepare('DELETE FROM generation_documents WHERE generation_id=?').run(id);for(const job of state.db.prepare('SELECT job_id,cursor_json FROM jobs WHERE generation_id=?').all(id)){const cursor=JSON.parse(String(job.cursor_json));state.db.prepare('UPDATE jobs SET generation_id=NULL,cursor_json=? WHERE job_id=?').run(canonicalJSON(cursor.origin==='automatic'?{origin:'automatic'}:{}),String(job.job_id));}state.db.prepare('DELETE FROM generations WHERE generation_id=?').run(id);
+     state.db.prepare('DELETE FROM passages WHERE generation_id=?').run(id);state.db.prepare('DELETE FROM generation_documents WHERE generation_id=?').run(id);for(const job of state.db.prepare('SELECT job_id,cursor_json FROM jobs WHERE generation_id=?').all(id)){const cursor=JSON.parse(String(job.cursor_json));state.db.prepare('UPDATE jobs SET generation_id=NULL,cursor_json=? WHERE job_id=?').run(canonicalJSON(automaticCursorMetadata(cursor)),String(job.job_id));}state.db.prepare('DELETE FROM generations WHERE generation_id=?').run(id);
     });
     await this.options.fault?.('gc-after-state-commit');if(exists)await rm(trash,{recursive:true});await rm(file);await syncDirectory(join(state.root,".maintenance"));await syncDirectory(join(state.root,"generations",".trash"));removed.push(id);bytes+=candidate.bytes;
    }catch(error){await reconcileGC(this.catalog);throw error;}finally{release();}

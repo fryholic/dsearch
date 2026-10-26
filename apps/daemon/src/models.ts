@@ -29,7 +29,10 @@ export class ModelManager {
   async availability(role: string) {
     const model=(await this.list()).find(m=>m.role===role);if(!model)throw new DsearchError('COMPATIBILITY_FAILED');
     const info=await lstat(join(this.root,model.filename)).catch((error:NodeJS.ErrnoException)=>{if(error.code!=='ENOENT')throw error;return undefined;});
-    return {ready:['verified','unverified'].includes(model.state),fingerprint:digest(canonicalJSON([model.sha256,model.state,info?this.signature(info):null])),error:model.error_code};
+    const ready=['verified','unverified'].includes(model.state);
+    // In-memory verification status resets on startup; unchanged input must keep
+    // the same retry identity across daemon restarts.
+    return {ready,fingerprint:digest(canonicalJSON([model.sha256,ready?'present':model.state,info?this.signature(info):null])),error:model.error_code};
   }
   async check(roles: string[], signal: AbortSignal, progress: Progress) {
     try { await this.safeRoot(); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new DsearchError('MODEL_NOT_INSTALLED');throw e; }let completed = 0;

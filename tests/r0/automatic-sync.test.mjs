@@ -2,11 +2,59 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm,rename,unlink} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
-import {execFile} from 'node:child_process';
+import {execFile,fork} from 'node:child_process';
+import {once} from 'node:events';
 import {promisify} from 'node:util';
 import {createApplication} from '../../apps/daemon/dist/index.js';
+import {DsearchError} from '../../packages/contracts/dist/index.js';
+import {GenerationGC} from '../../packages/generations/dist/index.js';
 const root=resolve(import.meta.dirname,'../..'),run=promisify(execFile),sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(read){for(let i=0;i<5000;i++){const result=await read();if(result)return result;await sleep(20);}throw new Error('Automatic synchronization timed out');}
+async function postControl(app,dataRoot,path){
+ const token=(await readFile(join(dataRoot,'credentials/device-token'),'utf8')).trim();
+ for(let attempt=0;attempt<150;attempt++){
+  const response=await fetch(app.url+path,{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:'{}'}),packet=await response.json();
+  if(!packet.ok&&packet.error.code==='BUSY'){assert.equal(packet.error.retryable,true);await sleep(20);continue;}
+  assert.equal(packet.ok,true,JSON.stringify(packet.error));return packet.data;
+ }
+ throw new Error('Mutation barrier did not release for explicit recovery');
+}
+test('a crash immediately after automatic job creation cannot lose the persisted retry identity',async()=>{
+ await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/automatic-queued-crash-')),source=join(folder,'source'),dataRoot=join(folder,'data');await mkdir(source);
+ const text='# Owner\n\nKeep the project owner recorded.';await writeFile(join(source,'owner.md'),text);
+ const child=fork(join(root,'tests/fixtures/queued-auto-crash.mjs'),[dataRoot,source,join(root,'.local/qmd-audited'),join(root,'.local/models')],{stdio:['ignore','ignore','ignore','ipc'],execArgv:[]});
+ const [code,signal]=await once(child,'exit');assert.equal(code,null);assert.equal(signal,'SIGKILL');
+ const app=await createApplication({dataRoot,synchronization:{stableMs:50,maxDelayMs:150,pollMs:100,retryMs:10}});
+ try{
+  await until(()=>app.status().synchronization.state==='blocked');await sleep(250);assert.equal(app.status().jobs.length,1);assert.equal(app.status().jobs[0].state,'obsolete');assert.equal(app.status().synchronization.error_code,'WORKER_EXITED');
+  const cursor=JSON.parse(app.catalog.state.db.prepare('SELECT cursor_json FROM jobs').get().cursor_json);assert.match(cursor.automatic_key,/^[a-f0-9]{64}$/);
+  await postControl(app,dataRoot,'/v1/jobs/'+app.status().jobs[0].job_id+'/retry');await until(()=>app.status().generation&&!app.status().needs_rebuild&&app.status().synchronization.state==='idle');assert.equal(await readFile(join(source,'owner.md'),'utf8'),text);
+ }finally{await app.close();await rm(folder,{recursive:true,force:true});}
+});
+test('automatic failures and explicit cancellation stay suppressed after native checkpoints, GC and daemon restart',async t=>{
+ await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/automatic-durable-')),source=join(folder,'source'),dataRoot=join(folder,'data');await mkdir(source);
+ await writeFile(join(source,'a.md'),'# Owner\n\nRecord the project owner.');await writeFile(join(source,'b.md'),'# Milestone\n\nReview the milestone.');
+ const options={dataRoot,synchronization:{stableMs:50,maxDelayMs:150,pollMs:100,retryMs:10}};let app=await createApplication(options),revision=0;
+ const settled=()=>until(()=>{const s=app.status();return s.generation&&!s.needs_rebuild&&s.synchronization.state==='idle'&&s;});
+ try{
+  const collection=await app.catalog.addCollection({name:'Projects',root:source});app.synchronization.notify('configuration',true);await settled();
+  for(const phase of ['reuse-copy-batch','batch-before-native','checkpoint-initial'])await t.test(phase,async()=>{
+   await app.models.check(['embed'],new AbortController().signal,()=>{});const old=app.status().generation.generation_id;
+   app.builder.options.fault=at=>{if(at!==phase)return;if(phase==='checkpoint-initial')app.builder.cancel(app.synchronization.info().job_id);else throw new DsearchError('MODEL_UNAVAILABLE');};
+   await writeFile(join(source,'a.md'),'# Owner\n\nChanged owner assignment '+(++revision)+'.');app.synchronization.notify('filesystem');
+   await until(()=>app.status().synchronization.state==='blocked');const failed=app.status().jobs.find(j=>['failed','cancelled'].includes(j.state)),row=app.catalog.state.db.prepare('SELECT generation_id,cursor_json FROM jobs WHERE job_id=?').get(failed.job_id),cursor=JSON.parse(row.cursor_json);
+   assert.equal(cursor.origin,'automatic');assert.match(cursor.automatic_key,/^[a-f0-9]{64}$/);assert.equal(app.status().generation.generation_id,old);
+   if(phase==='reuse-copy-batch'){
+    assert.equal(cursor.checkpoint,undefined);const gc=new GenerationGC(app.catalog),policy={keep_retired:0,min_age_seconds:0},preview=await gc.preview(policy);assert.ok(preview.candidates.some(g=>g.generation_id===row.generation_id));await gc.apply(preview.plan_id,policy);assert.equal(app.catalog.state.db.prepare('SELECT generation_id FROM jobs WHERE job_id=?').get(failed.job_id).generation_id,null);
+   }else assert.ok(cursor.checkpoint);
+   const jobs=app.status().jobs.length;await app.close();app=await createApplication(options);await until(()=>app.status().synchronization.state==='blocked');await sleep(250);
+   assert.equal(app.status().jobs.length,jobs);assert.equal(app.status().generation.generation_id,old);assert.equal(app.status().synchronization.error_code,phase==='checkpoint-initial'?'CANCELLED':'MODEL_UNAVAILABLE');
+   assert.ok(app.catalog.documents(collection.collection_id).some(d=>d.relative_path==='b.md'&&d.present));
+   await postControl(app,dataRoot,phase==='reuse-copy-batch'?'/v1/reconcile':'/v1/jobs/'+failed.job_id+'/retry');
+   await settled();assert.notEqual(app.status().generation.generation_id,old);
+  });
+ }finally{await app.close();await rm(folder,{recursive:true,force:true});}
+});
 test('real filesystem changes converge through automatic native indexing with controls shared by CLI and GUI API',async t=>{
  await mkdir(join(root,'.local/alpha'),{recursive:true});const folder=await mkdtemp(join(root,'.local/alpha/automatic-')),source=join(folder,'source'),dataRoot=join(folder,'data');await mkdir(source);await writeFile(join(source,'a.md'),'# Project Alpha\n\nRecord the owner before the milestone review.');await writeFile(join(source,'b.md'),'# Project Beta\n\nPrepare the release checklist.');
  const options={dataRoot,synchronization:{stableMs:100,maxDelayMs:400,pollMs:1500,retryMs:20}};let app=await createApplication(options),token=(await readFile(join(dataRoot,'credentials/device-token'),'utf8')).trim();

@@ -9,6 +9,14 @@ import {ModelManager} from '../../apps/daemon/dist/models.js';
 import {ManagedJobs} from '../../apps/daemon/dist/jobs.js';
 async function fixture(t){const folder=await realpath(await mkdtemp(join(tmpdir(),'dsearch-p5-')));t.after(()=>rm(folder,{recursive:true,force:true}));return folder;}
 const bytes=Buffer.from('verified-model-fixture'),model={role:'embed',repository:'test/model',revision:'a'.repeat(40),filename:'fixture.gguf',bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};
+test('retry identity survives verification and manager restart but changes with the physical model input',async t=>{
+ const root=await fixture(t);await writeFile(join(root,model.filename),bytes);
+ const models=new ModelManager(root,[model]),before=await models.availability('embed');assert.equal(before.ready,true);
+ await models.check(['embed'],new AbortController().signal,()=>{});assert.equal((await models.availability('embed')).fingerprint,before.fingerprint);
+ assert.equal((await new ModelManager(root,[model]).availability('embed')).fingerprint,before.fingerprint);
+ await writeFile(join(root,model.filename),Buffer.alloc(bytes.length));assert.notEqual((await models.availability('embed')).fingerprint,before.fingerprint);
+ await assert.rejects(models.check(['embed'],new AbortController().signal,()=>{}),{code:'MODEL_UNAVAILABLE'});assert.equal((await models.availability('embed')).ready,false);
+});
 test('model preparation verifies fixed downloads, preserves files on failure and cleans cancelled partials',async t=>{
  const folder=await fixture(t),root=join(folder,'models');let requests=0;const models=new ModelManager(root,[model],async(url)=>{requests++;assert.equal(url,'https://huggingface.co/test/model/resolve/'+model.revision+'/fixture.gguf');return new Response(bytes);});
  assert.equal((await models.list())[0].state,'missing');await models.prepare(['embed'],new AbortController().signal,()=>{});assert.deepEqual(await readFile(join(root,model.filename)),bytes);assert.equal((await models.list())[0].state,'verified');await models.prepare(['embed'],new AbortController().signal,()=>{});assert.equal(requests,1);
