@@ -12,7 +12,7 @@ async function until(read){for(let i=0;i<500;i++){const value=read();if(value)re
 async function fixture(t,options={}){
  const folder=await mkdtemp(join(tmpdir(),'dsearch-sync-')),source=join(folder,'source');await mkdir(source);await writeFile(join(source,'guide.md'),'# Guide\n\nRecord the owner.');const state=await StateStore.open(join(folder,'data')),catalog=new Catalog(state),collection=await catalog.addCollection({name:'Projects',root:source}),fp='a'.repeat(64);state.db.prepare("INSERT INTO profiles VALUES ('fixture',?,'{}','validated',?)").run(fp,new Date().toISOString());
  const controls={enabled:true,busy:false,ready:true,model:'one',beforePublish:undefined,error:undefined},calls=[],watches=new Map(),aborts=new Map();let published=0;
- const host={catalog,enabled:()=>controls.enabled,busy:()=>controls.busy,profile:()=>fp,models:async()=>({ready:controls.ready,fingerprint:controls.model}),published:()=>published++,cancel:id=>{state.db.prepare('UPDATE jobs SET cancel_requested=1 WHERE job_id=?').run(id);aborts.get(id)?.abort();},build:automatic=>{
+ const host={catalog,enabled:()=>controls.enabled,busy:()=>controls.busy,profile:()=>fp,models:async()=>({ready:controls.ready,fingerprint:controls.model}),published:()=>published++,stop:id=>{aborts.get(id)?.abort();},cancel:id=>{state.db.prepare('UPDATE jobs SET cancel_requested=1 WHERE job_id=?').run(id);aborts.get(id)?.abort();},build:automatic=>{
   const job_id=randomUUID(),generation_id=randomUUID(),seq=state.sourceSeq,at=new Date().toISOString(),controller=new AbortController();aborts.set(job_id,controller);calls.push({seq,job_id,at:Date.now()});
   state.db.prepare("INSERT INTO generations VALUES (?, 'fixture',?,'building',?,?,NULL,'{}',?,NULL)").run(generation_id,fp,join(state.root,'generations',generation_id),seq,at);state.db.prepare("INSERT INTO jobs VALUES (?,?,'full-build',?,'running','embedding',?,'{}',0,0,NULL,NULL,NULL,?)").run(job_id,job_id,generation_id,JSON.stringify(automatic),at);
   const completion=Promise.resolve().then(async()=>{if(controls.beforePublish)await Promise.race([controls.beforePublish(),new Promise((_,reject)=>controller.signal.addEventListener('abort',()=>reject(new DsearchError('CANCELLED')),{once:true}))]);if(controller.signal.aborted)throw new DsearchError('CANCELLED');if(controls.error)throw new DsearchError(controls.error);
@@ -53,6 +53,32 @@ test('continuous event hints are bounded by the maximum coalescing window',async
 
 test('a delayed or reversed clock tick requests wake reconciliation before native readers are reused',async t=>{
  let now=Date.now(),wakes=0;const f=await fixture(t,{pollMs:50,now:()=>now});f.sync.host.onWake=async()=>{wakes++;};await until(()=>f.calls.length===1&&f.sync.info().state==='idle');now+=5000;await until(()=>wakes===1&&f.sync.info().state==='idle');now-=10000;await until(()=>wakes===2&&f.sync.info().state==='idle');assert.equal(f.calls.length,1);
+});
+test('wake recovery is coalesced while automatic synchronization is disabled and the host is busy',async t=>{
+ const f=await fixture(t);await until(()=>f.calls.length===1&&f.sync.info().state==='idle');f.controls.enabled=false;f.sync.refresh();f.controls.busy=true;
+ let release,wakes=0;const gate=new Promise(resolve=>release=resolve);f.sync.host.onWake=async()=>{wakes++;await gate;};
+ f.sync.notify('wake',true);f.sync.notify('wake',true);await until(()=>wakes===1);assert.equal(f.sync.busy,true);assert.equal(f.sync.recovering,true);assert.equal(f.sync.info().enabled,false);
+ await writeFile(join(f.source,'guide.md'),'# Guide\n\nKept pending while automatic indexing is disabled.');
+ release();await until(()=>!f.sync.recovering);await sleep(100);assert.equal(f.calls.length,1);assert.equal(f.sync.info().state,'disabled');assert.equal(f.watches.get(f.source).closed,true);
+});
+test('wake interrupts an automatic build before waiting for an occupied host and permits one recovered attempt',async t=>{
+ const f=await fixture(t);await until(()=>f.calls.length===1&&f.sync.info().state==='idle');f.controls.beforePublish=()=>new Promise(()=>{});
+ await writeFile(join(f.source,'guide.md'),'# Guide\n\nInterrupted by wake.');f.watches.get(f.source).changed();await until(()=>f.sync.info().state==='indexing');const interrupted=f.calls.at(-1).job_id;
+ let wakes=0;f.controls.busy=true;f.sync.host.onWake=async()=>{wakes++;f.controls.busy=false;f.controls.beforePublish=undefined;};f.sync.notify('wake',true);
+ await until(()=>f.calls.length===3&&f.sync.info().state==='idle');assert.equal(wakes,1);
+ assert.equal(JSON.parse(f.state.db.prepare('SELECT cursor_json FROM jobs WHERE job_id=?').get(interrupted).cursor_json).automatic_retry_allowed,true);
+});
+test('a failed wake cleanup blocks reuse without an automatic retry loop and a later reset can recover',async t=>{
+ const f=await fixture(t);await until(()=>f.calls.length===1&&f.sync.info().state==='idle');f.controls.enabled=false;f.sync.refresh();let wakes=0;
+ f.sync.host.onWake=async()=>{wakes++;throw new DsearchError('WORKER_EXITED');};f.sync.notify('wake',true);await until(()=>f.sync.info().error_code==='WORKER_EXITED');
+ assert.equal(f.sync.recovering,true);await sleep(100);assert.equal(wakes,1);assert.equal(f.calls.length,1);
+ f.sync.host.onWake=async()=>{wakes++;};f.sync.notify('wake',true);await until(()=>!f.sync.recovering);assert.equal(wakes,2);assert.equal(f.sync.info().error_code,null);
+});
+test('an explicit cancellation arriving after wake began still prevents automatic retry',async t=>{
+ const f=await fixture(t);await until(()=>f.calls.length===1&&f.sync.info().state==='idle');f.controls.beforePublish=()=>new Promise(()=>{});
+ await writeFile(join(f.source,'guide.md'),'# Guide\n\nCancelled during wake.');f.watches.get(f.source).changed();await until(()=>f.sync.info().state==='indexing');const id=f.sync.info().job_id;
+ f.sync.notify('wake',true);f.sync.host.cancel(id);f.controls.beforePublish=undefined;await until(()=>f.sync.info().state==='blocked');
+ assert.equal(f.sync.info().error_code,'CANCELLED');assert.notEqual(JSON.parse(f.state.db.prepare('SELECT cursor_json FROM jobs WHERE job_id=?').get(id).cursor_json).automatic_retry_allowed,true);await sleep(100);assert.equal(f.calls.length,2);
 });
 
 for(const code of ['MODEL_UNAVAILABLE','CANCELLED','WORKER_EXITED'])test('automatic '+code+' suppression survives a new controller; explicit retry and changed inputs work',async t=>{

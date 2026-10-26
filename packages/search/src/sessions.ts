@@ -12,6 +12,7 @@ type Session = {
     lastAccess: number;
     running: boolean;
     expired: boolean;
+    interrupted?: boolean;
     bytes: number;
     listeners: Set<(value: SearchStatus) => void>;
     lease?: ReadLease;
@@ -22,6 +23,7 @@ export class SearchSessions {
     private literalTail: Promise<void> = Promise.resolve();
     private lexicalTail: Promise<void> = Promise.resolve();
     private closing = false;
+    private recovering = false;
     private readonly timer: ReturnType<typeof setInterval>;
     constructor(readonly source: SourceSearch, readonly readers: ReaderPool, readonly settings: {
         ttlMs?: number;
@@ -36,9 +38,9 @@ export class SearchSessions {
     }
     get queuedCount(): number { return [...this.values.values()].filter(s => s.status.state === 'queued').length; }
     private now(): number { return this.settings.now?.() ?? Date.now(); }
-    private admit(): void {
+    private admit(native = true): void {
         this.sweep();
-        if (this.closing)
+        if (this.closing || (native && this.recovering))
             throw new DsearchError('SERVICE_UNAVAILABLE');
         while (this.values.size >= (this.settings.maxSessions ?? 50)) {
             const victim = [...this.values.values()].filter(v => !v.running && ['completed', 'failed', 'cancelled'].includes(v.status.state)).sort((a, b) => a.lastAccess - b.lastAccess)[0];
@@ -73,7 +75,7 @@ export class SearchSessions {
         return this.enqueue(scopes, (id, signal, progress) => this.source.compare(request, id, lease, signal, progress), lease, !lexical);
     }
     createLiteral(input: unknown) { const parsed = LiteralRequest.safeParse(input); if (!parsed.success)
-        throw new DsearchError('INVALID_REQUEST'); const request = parsed.data; this.source.validateCollections(request.collections); this.admit(); return this.enqueue(request.collections, (id, signal, progress) => this.source.literal(request, id, signal, progress)); }
+        throw new DsearchError('INVALID_REQUEST'); const request = parsed.data; this.source.validateCollections(request.collections); this.admit(false); return this.enqueue(request.collections, (id, signal, progress) => this.source.literal(request, id, signal, progress)); }
     private enqueue(scopes: string[], operation: (id: string, signal: AbortSignal, progress: (event: {
         phase: string;
         completed: number;
@@ -101,7 +103,7 @@ export class SearchSessions {
                 this.update(session, result);
             }
             catch (e) {
-                const candidate = e && typeof e === 'object' && 'code' in e ? ErrorCode.safeParse(e.code) : undefined, code = session.controller.signal.aborted ? 'CANCELLED' : candidate?.success ? candidate.data : 'INTERNAL_ERROR';
+                const candidate = e && typeof e === 'object' && 'code' in e ? ErrorCode.safeParse(e.code) : undefined, code = session.interrupted ? 'SERVICE_UNAVAILABLE' : session.controller.signal.aborted ? 'CANCELLED' : candidate?.success ? candidate.data : 'INTERNAL_ERROR';
                 this.update(session, code === 'CANCELLED' ? { search_id: id, state: 'cancelled', phase: 'cancelled' } : { search_id: id, state: 'failed', phase: 'failed', error: { ...(ErrorReason.safeParse(e && typeof e === 'object' && 'reason' in e ? e.reason : undefined).success ? { reason: (e as DsearchError).reason } : {}), code, message: code, retryable: ['BUSY', 'SERVICE_UNAVAILABLE', 'SOURCE_PENDING'].includes(code) } });
             }
             finally {
@@ -136,7 +138,7 @@ export class SearchSessions {
             throw new DsearchError('RESULT_EXPIRED');
         if (['completed', 'failed', 'cancelled'].includes(session.status.state))
             return session.status;
-        session.controller.abort();
+        session.interrupted=false;session.controller.abort();
         this.update(session, { search_id: id, state: session.running ? 'cancel_requested' : 'cancelled', phase: session.running ? 'cancel-requested' : 'cancelled' });
         if (!session.running)
             this.free(session);
@@ -153,6 +155,16 @@ export class SearchSessions {
     invalidateCollection(id: string): void { for (const session of this.values.values())
         if (session.scopes.includes(id))
             this.expire(session); }
+    /** Preserve user cancellation; infrastructure interruption is a retryable failure. */
+    async interruptForWake(): Promise<void> {
+        this.recovering=true;
+        for(const session of this.values.values())if(session.lease&&!session.controller.signal.aborted&&!['completed','failed','cancelled'].includes(session.status.state)){
+            session.interrupted=true;session.controller.abort();
+            if(!session.running){this.update(session,{search_id:session.id,state:'failed',phase:'failed',error:{code:'SERVICE_UNAVAILABLE',message:'SERVICE_UNAVAILABLE',retryable:true}});this.free(session);}
+        }
+        await Promise.allSettled([this.tail,this.lexicalTail]);
+    }
+    resumeAfterWake(): void { this.recovering=false; }
     private free(session: Session): void { const lease = session.lease; delete session.lease; lease?.release(); }
     private expire(session: Session): void { session.expired = true; session.controller.abort(); if (!session.running)
         this.free(session); session.listeners.clear(); this.values.delete(session.id); }

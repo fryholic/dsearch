@@ -27,6 +27,7 @@ type Entry = {
     tail: Promise<void>;
     worker?: QmdWorker;
     retired: boolean;
+    invalidated?: boolean;
     disposing?: boolean;
 };
 export type ReadLease = {
@@ -41,6 +42,7 @@ export type ReadLease = {
 /** Reserve a generation synchronously; retain its immutable files until every lease is released. */
 export class ReaderPool {
     private readonly entries = new Map<string, Entry>();
+    private readonly invalidating = new Set<Entry>();
     private closing = false;
     private readonly closings = new Set<Promise<void>>();
     private readonly idleTimer: ReturnType<typeof setInterval>;
@@ -52,7 +54,7 @@ export class ReaderPool {
         idleMs?: number;
         lexicalOnly?: boolean;
     }) { this.idleTimer = setInterval(() => this.sweep(), Math.min(options.idleMs ?? 300000, 30000));this.idleTimer.unref(); }
-    get residentWorkers(): number { return [...this.entries.values()].filter(e => e.worker && e.worker.process.state !== 'stopped').length; }
+    get residentWorkers(): number { return [...new Set([...this.entries.values(),...this.invalidating])].filter(e => e.worker && e.worker.process.state !== 'stopped').length; }
     active(): Snapshot {
         const value = this.catalog.state.db.prepare("SELECT a.generation_id,a.epoch,g.profile_fp,g.directory_path,g.manifest_sha256 FROM active_slot a JOIN generations g ON g.generation_id=a.generation_id WHERE a.slot=1 AND g.state='active'").get() as Snapshot | undefined;
         if (!value)
@@ -99,6 +101,7 @@ export class ReaderPool {
                 return; released = true; held.refs--; held.lastUsed = Date.now(); this.sweep(); this.dispose(held); } };
     }
     private ensure(entry: Entry): Promise<Reader> {
+        if(entry.invalidated)return Promise.reject(new DsearchError('SERVICE_UNAVAILABLE'));
         if (!entry.ready) {
             entry.ready = this.load(entry.snapshot, entry);
             void entry.ready.catch(() => { entry.retired = true; this.dispose(entry); });
@@ -111,6 +114,19 @@ export class ReaderPool {
             await entry.tail;await entry.ready.then(reader => reader.worker.close(), () => {});delete entry.ready;delete entry.worker;
         }
         await Promise.allSettled([...this.closings]);
+    }
+    /** Interrupt resident/opening workers without waiting behind their active native calls. */
+    async invalidate(): Promise<void> {
+        const entries=[...this.entries.values()];
+        for(const entry of entries){entry.invalidated=true;entry.retired=true;this.invalidating.add(entry);if(this.entries.get(entry.snapshot.generation_id)===entry)this.entries.delete(entry.snapshot.generation_id);}
+        await Promise.all(entries.map(async entry=>{
+            const stopped=entry.worker?.interrupt();
+            await stopped;
+            await entry.ready?.then(reader=>reader.worker.interrupt(),()=>{});
+            this.invalidating.delete(entry);
+            this.dispose(entry);
+        }));
+        await Promise.all([...this.closings]);
     }
     private async load(snapshot: Snapshot, entry: Entry): Promise<Reader> {
         const root = join(this.catalog.state.root, 'generations', snapshot.generation_id);
@@ -144,10 +160,12 @@ export class ReaderPool {
         }
         if (stored.length !== values.length || manifest.passages !== values.length)
             throw new DsearchError('SOURCE_MAP_MISMATCH');
+        if(entry.invalidated)throw new DsearchError('SERVICE_UNAVAILABLE');
         const worker = new QmdWorker();
         entry.worker = worker;
         try {
             await worker.open({ ...config, role: this.options.lexicalOnly ? 'lexical-reader' : 'reader' });
+            if(entry.invalidated)throw new DsearchError('SERVICE_UNAVAILABLE');
             return { worker, root, mappings, scopes: manifest.scopes };
         }
         catch (e) {
@@ -172,6 +190,6 @@ export class ReaderPool {
         this.closings.add(closing);
         void closing.finally(() => { this.closings.delete(closing);entry.unpin(); });
     }
-    async close(): Promise<void> { this.closing = true; clearInterval(this.idleTimer); const entries = [...this.entries.values()]; this.entries.clear(); await Promise.allSettled(entries.map(e => e.ready?.then(r => r.worker.close(), () => { }))); while (this.closings.size)
+    async close(): Promise<void> { this.closing = true; clearInterval(this.idleTimer); const entries = [...new Set([...this.entries.values(),...this.invalidating])]; this.entries.clear(); await Promise.allSettled(entries.map(e => e.ready?.then(r => r.worker.close(), () => { }))); while (this.closings.size)
         await Promise.allSettled([...this.closings]);for(const entry of entries)entry.unpin(); }
 }

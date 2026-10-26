@@ -7,13 +7,12 @@ import {once} from 'node:events';
 import {promisify} from 'node:util';
 import {createApplication} from '../../apps/daemon/dist/index.js';
 import {DsearchError} from '../../packages/contracts/dist/index.js';
-import {GenerationGC} from '../../packages/generations/dist/index.js';
 const root=resolve(import.meta.dirname,'../..'),run=promisify(execFile),sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(read){for(let i=0;i<5000;i++){const result=await read();if(result)return result;await sleep(20);}throw new Error('Automatic synchronization timed out');}
-async function postControl(app,dataRoot,path){
+async function postControl(app,dataRoot,path,value={}){
  const token=(await readFile(join(dataRoot,'credentials/device-token'),'utf8')).trim();
  for(let attempt=0;attempt<150;attempt++){
-  const response=await fetch(app.url+path,{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:'{}'}),packet=await response.json();
+  const response=await fetch(app.url+path,{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify(value)}),packet=await response.json();
   if(!packet.ok&&packet.error.code==='BUSY'){assert.equal(packet.error.retryable,true);await sleep(20);continue;}
   assert.equal(packet.ok,true,JSON.stringify(packet.error));return packet.data;
  }
@@ -45,7 +44,8 @@ test('automatic failures and explicit cancellation stay suppressed after native 
    await until(()=>app.status().synchronization.state==='blocked');const failed=app.status().jobs.find(j=>['failed','cancelled'].includes(j.state)),row=app.catalog.state.db.prepare('SELECT generation_id,cursor_json FROM jobs WHERE job_id=?').get(failed.job_id),cursor=JSON.parse(row.cursor_json);
    assert.equal(cursor.origin,'automatic');assert.match(cursor.automatic_key,/^[a-f0-9]{64}$/);assert.equal(app.status().generation.generation_id,old);
    if(phase==='reuse-copy-batch'){
-    assert.equal(cursor.checkpoint,undefined);const gc=new GenerationGC(app.catalog),policy={keep_retired:0,min_age_seconds:0},preview=await gc.preview(policy);assert.ok(preview.candidates.some(g=>g.generation_id===row.generation_id));await gc.apply(preview.plan_id,policy);assert.equal(app.catalog.state.db.prepare('SELECT generation_id FROM jobs WHERE job_id=?').get(failed.job_id).generation_id,null);
+    assert.equal(cursor.checkpoint,undefined);const policy={keep_retired:0,min_age_seconds:0},preview=await postControl(app,dataRoot,'/v1/maintenance/gc/preview',policy);assert.ok(preview.candidates.some(g=>g.generation_id===row.generation_id));
+    const gc=await postControl(app,dataRoot,'/v1/maintenance/gc/apply',{...policy,plan_id:preview.plan_id});await until(()=>['succeeded','failed','cancelled'].includes(app.status().jobs.find(j=>j.job_id===gc.job_id)?.state));assert.equal(app.status().jobs.find(j=>j.job_id===gc.job_id).state,'succeeded');assert.equal(app.catalog.state.db.prepare('SELECT generation_id FROM jobs WHERE job_id=?').get(failed.job_id).generation_id,null);
    }else assert.ok(cursor.checkpoint);
    const jobs=app.status().jobs.length;await app.close();app=await createApplication(options);await until(()=>app.status().synchronization.state==='blocked');await sleep(250);
    assert.equal(app.status().jobs.length,jobs);assert.equal(app.status().generation.generation_id,old);assert.equal(app.status().synchronization.error_code,phase==='checkpoint-initial'?'CANCELLED':'MODEL_UNAVAILABLE');

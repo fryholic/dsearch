@@ -6,18 +6,18 @@ import {beginMaintenance,automaticCursorMetadata,type AutomaticCursor,type Build
 export type SyncPhase='disabled'|'idle'|'debouncing'|'reconciling'|'queued'|'indexing'|'blocked';
 export type SyncInfo={enabled:boolean;state:SyncPhase;pending:boolean;job_id:string|null;last_reconciled_at:string|null;last_indexed_at:string|null;error_code:ErrorCode|null};
 type Hint='startup'|'filesystem'|'periodic'|'wake'|'configuration'|'models';
-type Host={catalog:Catalog;enabled:()=>boolean;busy:()=>boolean;profile:()=>string;models:()=>Promise<{ready:boolean;fingerprint:string;error?:ErrorCode|null}>;build:(automatic:AutomaticCursor)=>BuildHandle;cancel:(jobId:string)=>void;published:()=>void;onWake?:()=>void|Promise<void>};
+type Host={catalog:Catalog;enabled:()=>boolean;busy:()=>boolean;profile:()=>string;models:()=>Promise<{ready:boolean;fingerprint:string;error?:ErrorCode|null}>;build:(automatic:AutomaticCursor)=>BuildHandle;stop:(jobId:string)=>void;interrupt?:(jobId:string)=>void;published:()=>void;onWake?:()=>void|Promise<void>};
 type WatchHandle=Pick<FSWatcher,'close'|'on'>;
 /** Events are hints. Only a complete catalog reconciliation can decide what to publish. */
 export class Synchronization {
  private readonly watchers=new Map<string,WatchHandle>();
  private timer:ReturnType<typeof setTimeout>|undefined;
  private readonly poll:ReturnType<typeof setInterval>;
+ private readonly continuityPoll:ReturnType<typeof setInterval>;
  private dirty:{first:number;last:number;immediate:boolean}|undefined;
  private running:Promise<void>|undefined;
  private controller:AbortController|undefined;
  private active:BuildHandle|undefined;
- private cancelledBeforeStop=false;
  private phase:SyncPhase='idle';
  private lastReconciled:string|null=null;
  private lastIndexed:string|null=null;
@@ -25,32 +25,46 @@ export class Synchronization {
  private failedKey:string|undefined;
  private failedCode:ErrorCode|null=null;
  private closed=false;
- private lastPoll:number;
- private waking=false;
+ private lastTick:number;
+ private wakeReset:Promise<void>|undefined;
+ private wakeError:ErrorCode|null=null;
  private scanning=false;
  private readonly stableMs:number;
  private readonly maxDelayMs:number;
  private readonly pollMs:number;
  constructor(readonly host:Host,readonly options:{stableMs?:number;maxDelayMs?:number;pollMs?:number;retryMs?:number;now?:()=>number;watch?:(root:string,changed:()=>void,failed:()=>void)=>WatchHandle}={}){
-  this.lastPoll=this.now();this.stableMs=options.stableMs??5000;this.maxDelayMs=options.maxDelayMs??30000;this.pollMs=options.pollMs??60000;
+  this.lastTick=this.now();this.stableMs=options.stableMs??5000;this.maxDelayMs=options.maxDelayMs??30000;this.pollMs=options.pollMs??60000;
   if(![this.stableMs,this.maxDelayMs,this.pollMs,options.retryMs??500].every(v=>Number.isSafeInteger(v)&&v>0)||this.maxDelayMs<this.stableMs)throw new DsearchError('INVALID_REQUEST');
-  this.poll=setInterval(()=>{const now=this.now(),wake=now-this.lastPoll>this.pollMs*2||now<this.lastPoll;this.lastPoll=now;if(wake)this.waking=true;this.notify(wake?'wake':'periodic',true);},this.pollMs);this.poll.unref();
+  this.poll=setInterval(()=>{this.observeClock();this.notify('periodic',true);},this.pollMs);this.poll.unref();
+  this.continuityPoll=setInterval(()=>this.observeClock(),1000);this.continuityPoll.unref();
  }
  private now(){return this.options.now?.()??Date.now();}
+ /** A suspended event loop or discontinuous wall clock invalidates resident native contexts. */
+ observeClock(){const now=this.now(),gap=now-this.lastTick;this.lastTick=now;if(gap>3000||gap<0)this.notify('wake',true);}
  start(){if(!this.host.enabled())this.refresh();else this.notify('startup',true);}
- get busy(){return this.scanning;}
- info():SyncInfo{return {enabled:!this.closed&&this.host.enabled(),state:this.phase,pending:this.host.enabled()&&(!!this.dirty||!!this.running||this.phase==='blocked'),job_id:this.active?.job_id??null,last_reconciled_at:this.lastReconciled,last_indexed_at:this.lastIndexed,error_code:this.error};}
+ get recovering(){return !!this.wakeReset||!!this.wakeError;}
+ get busy(){return this.scanning||this.recovering;}
+ info():SyncInfo{return {enabled:!this.closed&&this.host.enabled(),state:this.phase,pending:this.host.enabled()&&(!!this.dirty||!!this.running||this.recovering||this.phase==='blocked'),job_id:this.active?.job_id??null,last_reconciled_at:this.lastReconciled,last_indexed_at:this.lastIndexed,error_code:this.error};}
  refresh(){
   if(!this.host.enabled()){this.error=null;this.phase='disabled';this.dirty=undefined;clearTimeout(this.timer);this.stopAutomatic();this.closeWatches();return;}
   this.notify('configuration',true);
  }
  notify(reason:Hint,immediate=false){
-  if(this.closed||!this.host.enabled())return;
+  if(this.closed)return;
+  if(reason==='wake')this.beginWake();
+  if(!this.host.enabled())return;
   if(reason==='models'||reason==='configuration')this.clearFailure();
   if(reason==='configuration'||reason==='startup')this.attach();
-  if(reason==='wake')this.waking=true;
   const now=this.now();if(!this.dirty)this.dirty={first:now,last:now,immediate};else{if(reason==='filesystem'||reason==='configuration')this.dirty.last=now;this.dirty.immediate ||=immediate&&reason!=='periodic';}
   this.schedule();
+ }
+ private beginWake(){
+  if(this.wakeReset)return;
+  clearTimeout(this.timer);this.wakeError=null;this.error=null;this.stopAutomatic(true);const interrupted=this.running;
+  this.phase=this.host.enabled()?'queued':'disabled';
+  this.wakeReset=Promise.resolve().then(async()=>{await this.host.onWake?.();await interrupted;}).catch(error=>{
+   this.wakeError=error instanceof DsearchError?error.code:'INTERNAL_ERROR';this.error=this.wakeError;if(this.host.enabled())this.phase='blocked';
+  }).finally(()=>{this.wakeReset=undefined;if(!this.closed&&this.host.enabled())this.notify('periodic',true);});
  }
  private clearFailure(){
   this.failedKey=undefined;this.failedCode=null;
@@ -65,12 +79,11 @@ export class Synchronization {
   if(metadata.automatic_key!==key||metadata.automatic_retry_allowed)return null;
   const code=ErrorCode.safeParse(row.error_code);return code.success?code.data:'INTERNAL_ERROR';
  }
- private stopAutomatic(){
-  if(!this.controller?.signal.aborted)this.cancelledBeforeStop=!!(this.active&&this.host.catalog.state.db.prepare('SELECT cancel_requested FROM jobs WHERE job_id=?').get(this.active.job_id)?.cancel_requested);
-  this.controller?.abort();if(this.active)this.host.cancel(this.active.job_id);
+ private stopAutomatic(wake=false){
+  this.controller?.abort();if(this.active){if(wake&&this.host.interrupt)this.host.interrupt(this.active.job_id);else this.host.stop(this.active.job_id);}
  }
  private schedule(delay?:number){
-  if(this.running||this.closed||!this.host.enabled()||!this.dirty)return;
+  if(this.running||this.closed||this.recovering||!this.host.enabled()||!this.dirty)return;
   clearTimeout(this.timer);if(this.phase!=='blocked')this.phase=this.host.busy()?'queued':'debouncing';
   const due=this.dirty.immediate?this.now():Math.min(this.dirty.last+this.stableMs,this.dirty.first+this.maxDelayMs);
   this.timer=setTimeout(()=>{this.timer=undefined;this.run();},delay??Math.max(0,due-this.now()));this.timer.unref();
@@ -92,7 +105,7 @@ export class Synchronization {
   }
  }
  private run(){
-  if(this.closed||!this.host.enabled()||!this.dirty)return;
+  if(this.closed||this.recovering||!this.host.enabled()||!this.dirty)return;
   if(this.host.busy()){this.phase='queued';this.schedule(this.options.retryMs??500);return;}
   const controller=new AbortController();this.controller=controller;this.dirty=undefined;
   this.running=this.perform(controller.signal).catch(error=>{
@@ -110,7 +123,6 @@ export class Synchronization {
    this.lastReconciled=new Date().toISOString();
   }finally{release?.();this.scanning=false;}
   if(signal.aborted)throw new DsearchError('CANCELLED');
-  if(this.waking){this.waking=false;await this.host.onWake?.();}
   const state=this.host.catalog.state,active=state.db.prepare("SELECT g.source_seq,g.profile_fp FROM active_slot a JOIN generations g USING(generation_id) WHERE g.state='active'").get();
   if(active?.source_seq===state.sourceSeq&&active.profile_fp===this.host.profile()){this.phase='idle';this.clearFailure();return;}
   const models=await this.host.models();if(signal.aborted)throw new DsearchError('CANCELLED');
@@ -121,11 +133,10 @@ export class Synchronization {
   this.phase='indexing';const job=this.host.build({origin:'automatic',automatic_key:key,automatic_source_seq:state.sourceSeq,automatic_profile_fp:this.host.profile()});this.active=job;
   try{await job.completion;if(signal.aborted)throw new DsearchError('CANCELLED');this.host.published();this.lastIndexed=new Date().toISOString();this.phase='idle';this.failedKey=undefined;}
   catch(error){
-   this.host.cancel(job.job_id);await job.completion.catch(()=>{});
-   if(signal.aborted){if(!this.cancelledBeforeStop){const cursor=JSON.parse(String(state.db.prepare('SELECT cursor_json FROM jobs WHERE job_id=?').get(job.job_id)!.cursor_json));state.db.prepare('UPDATE jobs SET cursor_json=? WHERE job_id=?').run(canonicalJSON({...cursor,automatic_retry_allowed:true}),job.job_id);}throw error;}
+   if(signal.aborted){const row=state.db.prepare('SELECT cancel_requested,cursor_json FROM jobs WHERE job_id=?').get(job.job_id)!;if(!row.cancel_requested){const cursor=JSON.parse(String(row.cursor_json));state.db.prepare('UPDATE jobs SET cursor_json=? WHERE job_id=?').run(canonicalJSON({...cursor,automatic_retry_allowed:true}),job.job_id);}throw error;}
    this.failedKey=key;this.failedCode=error instanceof DsearchError?error.code:'INTERNAL_ERROR';
    if(error instanceof DsearchError&&['STALE_EPOCH','STALE_REVISION','SOURCE_PENDING'].includes(error.code)){this.notify('filesystem');this.phase='debouncing';}else throw error;
   }
  }
- async close(){this.closed=true;clearInterval(this.poll);clearTimeout(this.timer);this.dirty=undefined;this.closeWatches();this.stopAutomatic();await this.running;this.phase='disabled';}
+ async close(){this.closed=true;clearInterval(this.poll);clearInterval(this.continuityPoll);clearTimeout(this.timer);this.dirty=undefined;this.closeWatches();this.stopAutomatic();await Promise.all([this.running,this.wakeReset]);this.phase='disabled';}
 }

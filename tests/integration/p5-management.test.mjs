@@ -9,6 +9,12 @@ import {ModelManager} from '../../apps/daemon/dist/models.js';
 import {ManagedJobs} from '../../apps/daemon/dist/jobs.js';
 async function fixture(t){const folder=await realpath(await mkdtemp(join(tmpdir(),'dsearch-p5-')));t.after(()=>rm(folder,{recursive:true,force:true}));return folder;}
 const bytes=Buffer.from('verified-model-fixture'),model={role:'embed',repository:'test/model',revision:'a'.repeat(40),filename:'fixture.gguf',bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};
+test('managed work cannot be admitted after recovery begins and becomes available after cleanup',async t=>{
+ const folder=await fixture(t),state=await StateStore.open(join(folder,'data'));let ready=false,calls=0;const jobs=new ManagedJobs(state,{canStart:()=>ready});
+ try{assert.throws(()=>jobs.start('model-check',async()=>{calls++;}),{code:'SERVICE_UNAVAILABLE'});assert.equal(state.db.prepare('SELECT count(*) AS n FROM jobs').get().n,0);ready=true;
+  const accepted=jobs.start('model-check',async()=>{calls++;});await new Promise(resolve=>setImmediate(resolve));assert.equal(calls,1);assert.equal(jobs.info(accepted.job_id).state,'succeeded');
+ }finally{await jobs.close();state.close();}
+});
 test('retry identity survives verification and manager restart but changes with the physical model input',async t=>{
  const root=await fixture(t);await writeFile(join(root,model.filename),bytes);
  const models=new ModelManager(root,[model]),before=await models.availability('embed');assert.equal(before.ready,true);

@@ -14,7 +14,7 @@ export class ProfileController {
   private currentBuilder: GenerationBuilder;
   private staging: GenerationBuilder | undefined;
   private closing = false;
-  constructor(readonly catalog: Catalog, readonly options: { profiles: ProfileManifest[]; engineRoot: string; modelRoot: string; models: ModelManager; lane: HeavyLane; readers: ReaderPool }) {
+  constructor(readonly catalog: Catalog, readonly options: { profiles: ProfileManifest[]; engineRoot: string; modelRoot: string; models: ModelManager; lane: HeavyLane; readers: ReaderPool;canStart?:()=>boolean }) {
     for (const profile of options.profiles) {
       const fp = digest(canonicalJSON(profile)), prior = catalog.state.db.prepare('SELECT profile_fp FROM profiles WHERE profile_id=?').get(profile.profile_id);
       if (prior && prior.profile_fp !== fp) throw new DsearchError('COMPATIBILITY_FAILED');
@@ -34,7 +34,7 @@ export class ProfileController {
   }
   roles(profile: ProfileManifest): string[] { return [profile.models.embed.dimension === 1024 ? 'embed' : 'reference', 'rerank']; }
   private makeBuilder(profile: ProfileManifest, requireAll = false) {
-    return new GenerationBuilder(this.catalog, { engineRoot: this.options.engineRoot, modelRoot: this.options.modelRoot, profile, embedRole: profile.models.embed.dimension === 1024 ? 'embed' : 'reference', lane: this.options.lane,
+    return new GenerationBuilder(this.catalog, { engineRoot: this.options.engineRoot, modelRoot: this.options.modelRoot, profile, embedRole: profile.models.embed.dimension === 1024 ? 'embed' : 'reference', lane: this.options.lane,...(this.options.canStart?{canStart:this.options.canStart}:{}),
       beforeResume: async () => this.options.readers.unloadExcept(),
       beforeWork: async signal => { await this.options.readers.unloadExcept();if (requireAll) await this.options.models.check(this.roles(profile), signal, () => {}); } });
   }
@@ -44,7 +44,7 @@ export class ProfileController {
     return { active_epoch: epoch, selected_profile_id: this.selected.profile_id, profiles: this.options.profiles.map(p => ({ profile_id: p.profile_id, alias: p.models.embed.dimension === 1024 ? 'qwen-local' : 'qmd-reference', title: p.models.embed.dimension === 1024 ? 'Qwen3 · 0.6B' : 'EmbeddingGemma · 300M', profile_fp: digest(canonicalJSON(p)), status: String(state.db.prepare('SELECT status FROM profiles WHERE profile_id=?').get(p.profile_id)!.status), model_roles: this.roles(p), manifest: p })), generations };
   }
   prepare(id: string, publish = false) {
-    if (this.closing) throw new DsearchError('SERVICE_UNAVAILABLE');if (this.busy) throw new DsearchError('BUSY');
+    if (this.closing||this.options.canStart?.()===false) throw new DsearchError('SERVICE_UNAVAILABLE');if (this.busy) throw new DsearchError('BUSY');
     const builder = this.makeBuilder(this.resolve(id), true);this.staging = builder;
     const target = this.resolve(id), handle = builder.start({ publish });
     void handle.completion.then(result => { if (result.published) { this.selected = target;this.currentBuilder = this.makeBuilder(target); } }, () => {});
@@ -52,13 +52,14 @@ export class ProfileController {
     return handle;
   }
   resume(jobId:string) {
-    if(this.closing)throw new DsearchError('SERVICE_UNAVAILABLE');if(this.busy)throw new DsearchError('BUSY');
+    if(this.closing||this.options.canStart?.()===false)throw new DsearchError('SERVICE_UNAVAILABLE');if(this.busy)throw new DsearchError('BUSY');
     const row=this.catalog.state.db.prepare('SELECT g.profile_id FROM jobs j JOIN generations g USING(generation_id) WHERE j.job_id=?').get(jobId);if(!row)throw new DsearchError('NOT_FOUND');
     const target=this.resolve(String(row.profile_id)),builder=this.makeBuilder(target),handle=builder.start({resume:jobId});this.staging=builder;
     void handle.completion.then(result=>{if(result.published){this.selected=target;this.currentBuilder=this.makeBuilder(target);}},()=>{});
     void handle.completion.finally(()=>{if(this.staging===builder)this.staging=undefined;}).catch(()=>{});return handle;
   }
   async activate(profileId: string, generationId: string, expectedEpoch: number, signal: AbortSignal, progress: (phase: string) => void) {
+    if(this.closing||this.options.canStart?.()===false)throw new DsearchError('SERVICE_UNAVAILABLE');
     const target = this.resolve(profileId), fp = digest(canonicalJSON(target));
     progress('waiting-model');
     await this.options.lane.run(signal, async () => {
@@ -78,12 +79,13 @@ export class ProfileController {
       const engine = JSON.parse(await readFile(join(root, 'engine-config.json'), 'utf8')) as OpenEngine;
       if (engine.engineRoot !== this.options.engineRoot || engine.modelRoot !== this.options.modelRoot || engine.dbPath !== join(root, 'qmd.sqlite') || engine.generationId !== generationId || engine.collectionPath !== join(root, 'projection') || !engine.strict) throw new DsearchError('COMPATIBILITY_FAILED');
       await this.options.readers.unloadExcept();
-      const worker = new QmdWorker();try { await worker.open({ ...engine, role: 'reader' }); } finally { await worker.close(); }
+      const worker = new QmdWorker();try { await worker.open({ ...engine, role: 'reader' },{signal}); } finally { await worker.close(); }
       for (const doc of state.db.prepare("SELECT doc_id,revision_id FROM generation_documents WHERE generation_id=? AND processing_state IN ('included','partial','lexical_only')").all(generationId)) { check();await this.catalog.readDocument(String(doc.doc_id), String(doc.revision_id)); }
       await verifySeal(root, String(row.manifest_sha256));check();progress('publishing');
       state.transaction(() => { check();this.catalog.markPoliciesIndexed(scopes.map(c => c.collection_id));state.db.prepare("UPDATE generations SET state='retired' WHERE state='active'").run();state.db.prepare("UPDATE generations SET state='active' WHERE generation_id=?").run(generationId);state.db.prepare("INSERT INTO active_slot VALUES (1,?,?,?) ON CONFLICT(slot) DO UPDATE SET generation_id=excluded.generation_id,epoch=excluded.epoch,changed_at=excluded.changed_at").run(generationId, expectedEpoch + 1, new Date().toISOString()); });
       this.selected = target;this.currentBuilder = this.makeBuilder(target);this.options.readers.sweep();
     });
   }
+  async interruptForWake() { await Promise.all([this.currentBuilder.interruptForWake(),this.staging?.interruptForWake()]); }
   async close() { this.closing = true;await Promise.allSettled([this.currentBuilder.close(), this.staging?.close()]); }
 }

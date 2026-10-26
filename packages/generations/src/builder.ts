@@ -23,7 +23,7 @@ const timestamp = () => new Date().toISOString();
 export class GenerationBuilder {
   private active: ActiveBuild | undefined;
   private closing = false;
-  constructor(readonly catalog: Catalog, readonly options: { engineRoot: string; modelRoot: string; profile: ProfileManifest; embedRole: "embed" | "reference"; lane?: HeavyLane; beforeWork?: (signal: AbortSignal) => Promise<void>; beforeResume?: (signal: AbortSignal) => Promise<void>; fault?: (phase: string) => void | Promise<void> }) {}
+  constructor(readonly catalog: Catalog, readonly options: { engineRoot: string; modelRoot: string; profile: ProfileManifest; embedRole: "embed" | "reference"; lane?: HeavyLane; canStart?:()=>boolean; beforeWork?: (signal: AbortSignal) => Promise<void>; beforeResume?: (signal: AbortSignal) => Promise<void>; fault?: (phase: string) => void | Promise<void> }) {}
   get busy(): boolean { return this.active !== undefined; }
   getJob(id: string) {
     const row = this.catalog.state.db.prepare("SELECT job_id,kind,generation_id,state,phase,cursor_json,progress_json,cancel_requested,error_code,updated_at FROM jobs WHERE job_id=?").get(id);
@@ -35,8 +35,15 @@ export class GenerationBuilder {
     if (this.active?.handle.job_id !== id) return;
     this.catalog.state.db.prepare("UPDATE jobs SET cancel_requested=1,updated_at=? WHERE job_id=?").run(timestamp(), id);this.active.controller.abort();
   }
+  /** Controlled shutdown/disable must not manufacture an explicit user cancellation. */
+  stop(id: string): void { if(this.active?.handle.job_id===id)this.active.controller.abort(); }
+  async interruptForWake(id?: string): Promise<void> {
+    const active=this.active;if(!active||(id&&active.handle.job_id!==id))return;
+    active.controller.abort(new DsearchError('WORKER_EXITED'));
+    await active.handle.completion.catch(()=>{});
+  }
   start(options: { publish?: boolean; full?: boolean; resume?: string; automatic?: AutomaticCursor } = {}): BuildHandle {
-    if (this.closing) throw new DsearchError("SERVICE_UNAVAILABLE");
+    if (this.closing||this.options.canStart?.()===false) throw new DsearchError("SERVICE_UNAVAILABLE");
     if (this.active || maintenanceActive(this.catalog.state)) throw new DsearchError("BUSY");
     const state = this.catalog.state, profile = this.options.profile, fp = digest(canonicalJSON(profile)), jobId = randomUUID(), genId = randomUUID();
     const automatic=automaticCursorMetadata(options.automatic);
@@ -77,7 +84,7 @@ export class GenerationBuilder {
   }
   private async perform(jobId: string, genId: string, directory: string, fp: string, signal: AbortSignal, publish: boolean, full: boolean, resumeCursor?: CheckpointCursor): Promise<BuildResult> {
     const state = this.catalog.state, profile = this.options.profile;let builder = new QmdWorker(), reader: QmdWorker | undefined, releaseBase:(()=>void)|undefined;
-    const check = () => { if (signal.aborted) throw new DsearchError("CANCELLED"); };
+    const check = () => { if (signal.aborted) throw signal.reason instanceof DsearchError?signal.reason:new DsearchError("CANCELLED"); };
     const owner=process.pid+':'+jobId;
     const heartbeat=()=>state.db.prepare('UPDATE jobs SET lease_owner=?,lease_expires_at=? WHERE job_id=?').run(owner,new Date(Date.now()+60000).toISOString(),jobId);
     heartbeat();const timer=setInterval(heartbeat,10000);timer.unref();
@@ -119,7 +126,7 @@ export class GenerationBuilder {
       }
       const reuse = full || restored ? undefined : await snapshotForReuse(this.catalog, fp, engine, signal);
       releaseBase=reuse?.release;
-      const opened=await builder.open(engine) as {capabilities?:{boundedEmbedCalls?:boolean}};check();
+      const opened=await builder.open(engine,{signal}) as {capabilities?:{boundedEmbedCalls?:boolean}};check();
       if (!reuse && !restored) {
         const probe = await builder.invoke<EngineResponse<{ dimension: number; norm: number }>>("embedding", { text: "dsearch dimension validation probe", title: "", isQuery: true }, { signal });
         validationCalls=Number(probe.stats.embeddingCalls??0);
@@ -202,7 +209,7 @@ export class GenerationBuilder {
           if(saved.plan.profile_fp!==fp||saved.plan.generation_id!==genId||saved.plan.source_seq!==state.sourceSeq||saved.plan.expected_epoch!==Number(state.db.prepare('SELECT epoch FROM active_slot WHERE slot=1').get()?.epoch??0)||canonicalJSON(saved.plan.engine)!==canonicalJSON(engine))throw new DsearchError('STALE_EPOCH');
           for(const input of saved.plan.inputs){check();await this.catalog.readDocument(input.doc_id,input.revision_id);}
           await rm(engine.dbPath+'-wal',{force:true});await rm(engine.dbPath+'-shm',{force:true});await copyFile(join(directory,saved.checkpoint.database),engine.dbPath);
-          builder=new QmdWorker();await builder.open(engine);check();
+          builder=new QmdWorker();await builder.open(engine,{signal});check();
           this.phase(jobId,'embedding',{completed,total:semanticPassages,yields});await this.options.fault?.('yield-resumed');check();
         };
         await yieldForSearch(0);
@@ -217,7 +224,7 @@ export class GenerationBuilder {
             resourceRetries=1;if(started){failedNativeRequests++;const count=(error as {telemetry?:{embeddingCalls?:number}}).telemetry?.embeddingCalls;if(Number.isFinite(count)&&Number(count)>=0)embeddingCalls+=Number(count);else incompleteCalls=1;}
             const cursor=JSON.parse(String(state.db.prepare('SELECT cursor_json FROM jobs WHERE job_id=?').get(jobId)!.cursor_json));Object.assign(cursor,{resource_retries:1,max_documents:2,failed_native_requests:failedNativeRequests,embedding_call_count_incomplete:incompleteCalls});state.db.prepare('UPDATE jobs SET cursor_json=?,attempt=attempt+1 WHERE job_id=?').run(canonicalJSON(cursor),jobId);
             await builder.close();const saved=await loadCheckpoint(directory,cursor);if(saved.plan.source_seq!==state.sourceSeq)throw new DsearchError('STALE_EPOCH');for(const input of saved.plan.inputs)await this.catalog.readDocument(input.doc_id,input.revision_id);
-            await rm(engine.dbPath+'-wal',{force:true});await rm(engine.dbPath+'-shm',{force:true});await copyFile(join(directory,saved.checkpoint.database),engine.dbPath);this.phase(jobId,'retrying-memory',{completed:Math.min(finished,semanticPassages),total:semanticPassages,resource_retries:resourceRetries,failed_native_requests:failedNativeRequests,embedding_call_count_incomplete:incompleteCalls});await delay(2000,undefined,{signal});check();builder=new QmdWorker();await builder.open(engine);
+            await rm(engine.dbPath+'-wal',{force:true});await rm(engine.dbPath+'-shm',{force:true});await copyFile(join(directory,saved.checkpoint.database),engine.dbPath);this.phase(jobId,'retrying-memory',{completed:Math.min(finished,semanticPassages),total:semanticPassages,resource_retries:resourceRetries,failed_native_requests:failedNativeRequests,embedding_call_count_incomplete:incompleteCalls});await delay(2000,undefined,{signal});check();builder=new QmdWorker();await builder.open(engine,{signal});
           }}
           if(!Number.isSafeInteger(step.result.docsProcessed)||step.result.docsProcessed<0||step.result.docsProcessed>(resourceRetries?2:4)||(step.result.remainingDocs>0&&!step.result.docsProcessed)||Number(step.stats.truncatedInputs??0)!==0)throw new DsearchError('COMPATIBILITY_FAILED');
           results.push(step.result);embeddingCalls+=Number(step.stats.embeddingCalls);finished+=step.result.docsProcessed;remaining=step.result.remainingDocs;
@@ -254,7 +261,7 @@ export class GenerationBuilder {
         const addPassage = state.db.prepare("INSERT INTO passages VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
         for (const passage of mappings) addPassage.run(genId, passage.passage_id, passage.doc_id, passage.revision_id, passage.engine_collection, passage.engine_relative_path, passage.kind, passage.projection_sha256, canonicalJSON({ offset_unit: "utf16_lf", segments: passage.segments }), canonicalJSON(passage.heading), passage.embedding_tokens, "ready");
       });
-      reader = new QmdWorker();await reader.open({ ...engine, role: "reader" });await reader.close();await this.options.fault?.("before-publish");check();
+      reader = new QmdWorker();await reader.open({ ...engine, role: "reader" },{signal});await reader.close();await this.options.fault?.("before-publish");check();
       for (const doc of coverage.filter(d => ["included", "partial", "lexical_only"].includes(d.state))) await this.catalog.readDocument(doc.doc_id, doc.revision_id!);
       await verifySeal(directory, sealed.sha256);check();
       if (!publish) {
@@ -284,7 +291,8 @@ export class GenerationBuilder {
       if(committedResult)return committedResult;
       // Confirm native worker exit before publishing a terminal cancellation.
       await builder.close();if (reader) await reader.close();
-      const cancelled = signal.aborted || (e instanceof DsearchError && e.code === "CANCELLED"), code = e instanceof DsearchError ? e.code : "INTERNAL_ERROR";
+      const interrupted=signal.aborted&&signal.reason instanceof DsearchError&&signal.reason.code==='WORKER_EXITED'&&!state.db.prepare('SELECT cancel_requested FROM jobs WHERE job_id=?').get(jobId)?.cancel_requested;
+      const cancelled = !interrupted&&(signal.aborted || (e instanceof DsearchError && e.code === "CANCELLED")), code = interrupted?'WORKER_EXITED':e instanceof DsearchError ? e.code : "INTERNAL_ERROR";
       state.transaction(() => { state.db.prepare("UPDATE generations SET state='invalid' WHERE generation_id=?").run(genId);state.db.prepare("UPDATE jobs SET state=?,phase='stopped',error_code=?,updated_at=? WHERE job_id=?").run(cancelled ? "cancelled" : "failed", cancelled ? "CANCELLED" : code, timestamp(), jobId); });
       throw new DsearchError(cancelled ? "CANCELLED" : code);
     } finally { releaseBase?.();clearInterval(timer);state.db.prepare("UPDATE jobs SET lease_owner=NULL,lease_expires_at=NULL WHERE job_id=?").run(jobId);try { await builder.close();if (reader) await reader.close(); } finally { releaseLane?.(); } }

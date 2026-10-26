@@ -19,7 +19,9 @@ export type OpenEngine = {
 export class QmdWorker {
   readonly process = new EngineProcess(new URL("./worker.js", import.meta.url), { env: { QMD_EMBED_PARALLELISM: "1" } });
   private opened = false;
-  async open(options: OpenEngine): Promise<unknown> {
+  private closing: Promise<void> | undefined;
+  async open(options: OpenEngine, control: Parameters<EngineProcess["invoke"]>[1] = {}): Promise<unknown> {
+    if(control.signal?.aborted)throw new DsearchError('CANCELLED');
     await loadEngineArtifact(options.engineRoot, join(options.engineRoot, "dsearch-artifact.json"));
     if (options.strict) {
       const expected = JSON.parse(await readFile(new URL("../../../vendor/qmd-upstream.json", import.meta.url), "utf8")) as { commit: string; engineArtifactSha256: string; patchSha256: string; recovery?: { engineArtifactSha256: string; patchSha256: string }; audited?: { engineArtifactSha256: string; patchSha256: string } };
@@ -41,7 +43,7 @@ export class QmdWorker {
       }
     }
     const result = await this.process.invoke({ method: "open", ...options,
-      modelErrors, embedModel: join(options.modelRoot, embed.filename), rerankModel: join(options.modelRoot, rerank.filename) });
+      modelErrors, embedModel: join(options.modelRoot, embed.filename), rerankModel: join(options.modelRoot, rerank.filename) },control);
     this.opened = true; return result;
   }
   invoke<T>(method: string, args: unknown = {}, options: Parameters<EngineProcess["invoke"]>[1] = {}): Promise<T> {
@@ -50,8 +52,14 @@ export class QmdWorker {
   search(request: SearchRequest, options: Parameters<EngineProcess["invoke"]>[1] = {}): Promise<unknown> {
     return this.invoke("search", request, options);
   }
-  async close(): Promise<void> {
-    try { if (this.opened && this.process.state === "idle") await this.invoke("close", {}, { timeoutMs: 5000 }); }
-    finally { this.opened = false; await this.process.close(); }
+  /** Skip the optional close RPC when a suspended context may never answer it. */
+  async interrupt(): Promise<void> { this.opened=false;await this.process.close(); }
+  close(): Promise<void> {
+    if(!this.closing)this.closing=(async()=>{
+      try { if (this.opened && this.process.state === "idle") await this.invoke("close", {}, { timeoutMs: 5000 }); }
+      catch { /* Cleanup still requires confirmed process exit after an interrupted close reply. */ }
+      finally { this.opened = false; await this.process.close(); }
+    })();
+    return this.closing;
   }
 }

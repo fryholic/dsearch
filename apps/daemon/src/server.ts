@@ -95,17 +95,24 @@ export async function createApplication(options: ApplicationOptions = {}) {
         const backups=new BackupStore(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{})}),collector=new GenerationGC(catalog,{...(options.maintenanceFault?{fault:options.maintenanceFault}:{}),backupReferences:()=>backups.generationReferences()});await reconcileGC(catalog);await backups.reconcile();
         const knownProfiles = options.profile ? [ProfileManifest.parse(options.profile)] : (await Promise.all([createAlphaProfile(engineRoot), createAlphaProfile(engineRoot, 'reference')])).map(p => p.manifest);
         const recovery=await recoverActiveGeneration(catalog,{engineRoot,modelRoot,profileFingerprints:new Set(knownProfiles.map(p=>digest(canonicalJSON(p))))});
-        const models = await ModelManager.open(modelRoot), managed = new ManagedJobs(state,{profiles:new Set(knownProfiles.map(p=>digest(canonicalJSON(p))))}), lane = new HeavyLane();
+        let mayStart=()=>true;const canStart=()=>mayStart();
+        const models = await ModelManager.open(modelRoot), managed = new ManagedJobs(state,{profiles:new Set(knownProfiles.map(p=>digest(canonicalJSON(p)))),canStart}), lane = new HeavyLane();
         let profiles: ProfileController;
         const readers = new ReaderPool(catalog, { engineRoot, modelRoot, acceptProfile: fp => fp === profiles.fingerprint });
         const lexicalReaders = new ReaderPool(catalog, { engineRoot, modelRoot, acceptProfile: fp => fp === profiles.fingerprint, lexicalOnly: true });
         stopWorkers = async () => { await Promise.all([readers.close(), lexicalReaders.close()]); };
-        profiles = new ProfileController(catalog, { profiles: knownProfiles, engineRoot, modelRoot, models, lane, readers });
+        profiles = new ProfileController(catalog, { profiles: knownProfiles, engineRoot, modelRoot, models, lane, readers,canStart });
         const sessions = new SearchSessions(new SourceSearch(catalog,{...(options.onCandidateReceipt?{onCandidates:options.onCandidateReceipt}:{})}), readers, { lane, lexicalReaders });
         stopWorkers = async () => { await Promise.allSettled([profiles.close(), managed.close(), sessions.close()]); };
         const preferences = new PreferenceStore(root);await preferences.load();
         const sweepReaders = () => { readers.sweep();lexicalReaders.sweep(); };
-        const synchronization=new Synchronization({catalog,enabled:()=>options.synchronization?.enabled??preferences.get().auto_sync,busy:()=>profiles.busy||managed.busy||maintenanceActive(state!),profile:()=>profiles.fingerprint,models:()=>models.availability(profiles.profile.models.embed.dimension===1024?'embed':'reference'),build:automatic=>profiles.builder.start({automatic}),cancel:id=>profiles.builder.cancel(id),published:sweepReaders,onWake:()=>lane.run(new AbortController().signal,async()=>{await Promise.all([readers.unloadExcept(),lexicalReaders.unloadExcept()]);},'background')},options.synchronization);
+        const onWake=async()=>{
+          const settled=await Promise.allSettled([sessions.interruptForWake(),profiles.interruptForWake(),managed.interruptForWake(),readers.invalidate(),lexicalReaders.invalidate()]);
+          const failed=settled.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
+          sessions.resumeAfterWake();
+        };
+        const synchronization=new Synchronization({catalog,enabled:()=>options.synchronization?.enabled??preferences.get().auto_sync,busy:()=>profiles.busy||managed.busy||maintenanceActive(state!),profile:()=>profiles.fingerprint,models:()=>models.availability(profiles.profile.models.embed.dimension===1024?'embed':'reference'),build:automatic=>profiles.builder.start({automatic}),stop:id=>profiles.builder.stop(id),interrupt:id=>{void profiles.builder.interruptForWake(id);},published:sweepReaders,onWake},options.synchronization);
+        mayStart=()=>!synchronization.recovering;
         stopWorkers=async()=>{await Promise.allSettled([synchronization.close(),profiles.close(),managed.close(),sessions.close()]);};
         auth = await LocalAuth.open(root, instance, options.now);
         const authentication = auth, store = state, staticFiles = await assets(options.webRoot ?? join(workspace, 'apps/web/dist-web'));
@@ -119,6 +126,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
           const accepted=managed.start('backup',async(signal,progress)=>{progress('backing-up');const info=await backups.create(signal);store.db.prepare('UPDATE jobs SET cursor_json=? WHERE job_id=?').run(canonicalJSON({result:{kind:'backup',backup:info}}),accepted.job_id);progress('complete',{bytes:info.bytes,generations:info.generations});});return accepted;
         };
         const status = () => {
+            synchronization.observeClock();
             const profile = profiles.profile, profileFp = profiles.fingerprint;
             const generation = store.db.prepare("SELECT a.generation_id,a.epoch,g.profile_fp,g.source_seq,g.coverage_json FROM active_slot a JOIN generations g ON g.generation_id=a.generation_id WHERE a.slot=1 AND g.state='active'").get();
             const coverage: Record<string, number> = {};
@@ -165,6 +173,8 @@ export async function createApplication(options: ApplicationOptions = {}) {
                 return;
             }
             const mode = authentication.authenticate(req, origin);
+            synchronization.observeClock();
+            if(synchronization.recovering&&!['GET','HEAD','DELETE'].includes(req.method??'')&&!['/v1/literal-searches','/v1/documents/read','/v1/documents/info','/v1/documents/open','/v1/diagnostics','/v1/ui/code','/v1/shutdown'].includes(path))throw new DsearchError('SERVICE_UNAVAILABLE');
             if(maintenanceActive(store)&&!(path==='/v1/settings'&&synchronization.busy)&&!['GET','HEAD'].includes(req.method??'')&&!['/v1/searches','/v1/related-searches','/v1/comparisons','/v1/literal-searches','/v1/documents/read','/v1/documents/info','/v1/documents/open','/v1/diagnostics','/v1/ui/code','/v1/shutdown'].includes(path)&&!(req.method==='DELETE'&&/^\/v1\/(jobs|searches)\/[A-Za-z0-9_-]+$/.test(path)))throw new DsearchError('BUSY');
             if (path === '/v1/ui/session' && req.method === 'GET') {
                 const session = authentication.cookieSession(req, origin);
@@ -202,6 +212,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
             if(path==='/v1/maintenance/gc/apply'&&req.method==='POST'){
              const parsed=GCApply.safeParse(await body(req));if(!parsed.success)throw new DsearchError('INVALID_REQUEST');if(managed.busy||profiles.busy)throw new DsearchError('BUSY');const {plan_id,...policy}=parsed.data;
              const preview=await collector.preview(policy);if(preview.plan_id!==plan_id)throw new DsearchError('STALE_EPOCH');
+             if(maintenanceActive(store)||managed.busy||profiles.busy)throw new DsearchError('BUSY');
              const accepted=managed.start('generation-gc',async(signal,progress)=>{progress('collecting');const result=await collector.apply(plan_id,policy,signal);store.db.prepare('UPDATE jobs SET cursor_json=? WHERE job_id=?').run(canonicalJSON({result:{kind:'generation-gc',generation_ids:result.removed,bytes:result.bytes}}),accepted.job_id);progress('complete',{generations:result.removed.length,bytes:result.bytes});});json(res,202,envelope(accepted,requestId));return;
             }
             const jobResult=/^\/v1\/jobs\/([A-Za-z0-9_-]{1,128})\/result$/.exec(path);
