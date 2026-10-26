@@ -50,6 +50,7 @@ export class ReaderPool {
         profile_fp?: string;
         acceptProfile?: (fingerprint: string) => boolean;
         idleMs?: number;
+        lexicalOnly?: boolean;
     }) { this.idleTimer = setInterval(() => this.sweep(), Math.min(options.idleMs ?? 300000, 30000));this.idleTimer.unref(); }
     get residentWorkers(): number { return [...this.entries.values()].filter(e => e.worker && e.worker.process.state !== 'stopped').length; }
     active(): Snapshot {
@@ -146,7 +147,7 @@ export class ReaderPool {
         const worker = new QmdWorker();
         entry.worker = worker;
         try {
-            await worker.open({ ...config, role: 'reader' });
+            await worker.open({ ...config, role: this.options.lexicalOnly ? 'lexical-reader' : 'reader' });
             return { worker, root, mappings, scopes: manifest.scopes };
         }
         catch (e) {

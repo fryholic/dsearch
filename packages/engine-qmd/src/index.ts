@@ -12,7 +12,7 @@ export type CandidateReceipt = {
 export type OpenEngine = {
   engineRoot: string; dbPath: string; collectionPath: string; modelRoot: string;
   embedRole: "embed" | "reference"; strict: boolean;
-  role?: "probe" | "builder" | "reader" | "maintenance"; generationId?: string;
+  role?: "probe" | "builder" | "reader" | "lexical-reader" | "maintenance"; generationId?: string;
   collections?: Record<string, { path: string; pattern: string }>;
   semanticCollections?: string[];
 };
@@ -31,7 +31,9 @@ export class QmdWorker {
     const rerank = registry.models.find(m => m.role === "rerank");
     if (!embed || !rerank) throw new DsearchError("COMPATIBILITY_FAILED");
     const modelErrors: Record<string, string | null> = {};
-    for (const [key, model] of [['embed', embed], ['rerank', rerank]] as const) {
+    // The restricted lexical reader cannot execute any model operation. Keep the
+    // exact sealed configuration paths without hashing unused model weights.
+    for (const [key, model] of options.role === 'lexical-reader' ? [] : [['embed', embed], ['rerank', rerank]] as const) {
       try { await verifyModel(join(options.modelRoot, model.filename), model);modelErrors[key] = null; }
       catch (error) {
         if (options.role !== 'reader' && options.role !== 'maintenance' && !(options.role === 'builder' && key === 'rerank')) throw error;

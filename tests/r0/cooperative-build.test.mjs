@@ -31,6 +31,7 @@ test('bounded indexing releases real native contexts for search and resumes only
    const token=(await readFile(join(app.root,'credentials/device-token'),'utf8')).trim(),lane=builder.options.lane,release=await lane.acquire(new AbortController().signal,'background');
    try{
     const blocked=app.sessions.createKeyword(request);await sleep(0);assert.equal(lane.interactiveQueued,1);
+    const lexical=app.sessions.createKeyword({...request,query:'milestone',mode:'lexical'});const lexicalResult=await done(lexical);assert.equal(lexicalResult.state,'completed',JSON.stringify(lexicalResult));assert.ok(lexicalResult.results.length>0);assert.equal(lexicalResult.telemetry.embedding_calls,0);assert.equal(lexicalResult.telemetry.reranking_calls,0);assert.equal(lane.busy,true);
     const literal=app.sessions.createLiteral({query:'milestone',collections:[collection.collection_id]});const found=await done(literal);assert.equal(found.state,'completed',JSON.stringify(found));assert.ok(found.matches.length>0);assert.equal(terminal(app.sessions.get(blocked.search_id).state),false);
     const start=performance.now(),response=await fetch(app.url+'/v1/status',{headers:{authorization:'Bearer '+token}});assert.equal(response.status,200);assert.ok(performance.now()-start<300);app.sessions.cancel(blocked.search_id);
    }finally{release();builder.options.fault=undefined;}
@@ -48,7 +49,7 @@ test('bounded indexing releases real native contexts for search and resumes only
   await t.test('a corrupted persisted snapshot cannot be used after search yields back',async()=>{
    const builder=app.builder,before=app.status().generation.generation_id;let once=false,accepted;
    builder.options.fault=async phase=>{
-    if(phase==='checkpoint-batch'&&!once){once=true;accepted=app.sessions.createKeyword({...request,mode:'lexical',query:'milestone'});await sleep(0);}
+    if(phase==='checkpoint-batch'&&!once){once=true;accepted=app.sessions.createKeyword({...request,query:'milestone'});await sleep(0);}
     if(phase==='yield-released'){const job=state.db.prepare("SELECT * FROM jobs WHERE state='running' AND kind='full-build' ORDER BY updated_at DESC").get(),cursor=JSON.parse(job.cursor_json),directory=join(state.root,'generations',job.generation_id),checkpoint=JSON.parse(await readFile(join(directory,cursor.checkpoint),'utf8'));await writeFile(join(directory,checkpoint.database),'damaged-checkpoint');await done(accepted);}
    };
    const build=builder.start({full:true});try{await assert.rejects(build.completion,{code:'COMPATIBILITY_FAILED'});assert.equal(app.status().generation.generation_id,before);}finally{builder.options.fault=undefined;}
@@ -56,7 +57,7 @@ test('bounded indexing releases real native contexts for search and resumes only
   await t.test('unreported source changes during search stop resumption instead of publishing stale projections',async()=>{
    const builder=app.builder,before=app.status().generation.generation_id;let once=false,accepted;
    builder.options.fault=async phase=>{
-    if(phase==='checkpoint-batch'&&!once){once=true;accepted=app.sessions.createKeyword({...request,mode:'lexical',query:'milestone'});await sleep(0);}
+    if(phase==='checkpoint-batch'&&!once){once=true;accepted=app.sessions.createKeyword({...request,query:'milestone'});await sleep(0);}
     if(phase==='yield-released'){await done(accepted);await writeFile(join(source,'0.md'),'# Changed project\n\nA newer source revision.');}
    };
    const build=builder.start({full:true});try{await assert.rejects(build.completion,{code:'STALE_REVISION'});assert.equal(app.status().generation.generation_id,before);}finally{builder.options.fault=undefined;}

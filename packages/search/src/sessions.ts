@@ -20,6 +20,7 @@ export class SearchSessions {
     private readonly values = new Map<string, Session>();
     private tail: Promise<void> = Promise.resolve();
     private literalTail: Promise<void> = Promise.resolve();
+    private lexicalTail: Promise<void> = Promise.resolve();
     private closing = false;
     private readonly timer: ReturnType<typeof setInterval>;
     constructor(readonly source: SourceSearch, readonly readers: ReaderPool, readonly settings: {
@@ -28,6 +29,7 @@ export class SearchSessions {
         maxBytes?: number;
         now?: () => number;
         lane?: HeavyLane;
+        lexicalReaders?: ReaderPool;
     } = {}) {
         this.timer = setInterval(() => this.sweep(), 30000);
         this.timer.unref();
@@ -52,8 +54,9 @@ export class SearchSessions {
         const request = parsed.data;
         this.source.validateCollections(request.collections);
         this.admit();
-        const lease = this.readers.reserve(request.expected_epoch);
-        return this.enqueue(request.collections, (id, signal, progress) => this.source.keyword(request, id, lease, signal, progress), lease);
+        const lexical = request.mode === 'lexical' && !!this.settings.lexicalReaders;
+        const lease = (lexical ? this.settings.lexicalReaders! : this.readers).reserve(request.expected_epoch);
+        return this.enqueue(request.collections, (id, signal, progress) => this.source.keyword(request, id, lease, signal, progress), lease, !lexical);
     }
     createRelated(input: unknown) {
         const parsed = RelatedRequest.safeParse(input);if (!parsed.success) throw new DsearchError('INVALID_REQUEST');const request = parsed.data;
@@ -65,19 +68,20 @@ export class SearchSessions {
     createCompare(input: unknown) {
         const parsed = CompareRequest.safeParse(input);if (!parsed.success) throw new DsearchError('INVALID_REQUEST');const request = parsed.data;
         const scopes = [...new Set([request.left, request.right].map(ref => this.source.catalog.document(ref.doc_id).collection_id))];this.source.validateCollections(scopes);this.admit();
-        const lease = this.readers.reserve(request.expected_epoch);
-        return this.enqueue(scopes, (id, signal, progress) => this.source.compare(request, id, lease, signal, progress), lease);
+        const lexical = request.mode === 'lexical' && !!this.settings.lexicalReaders;
+        const lease = (lexical ? this.settings.lexicalReaders! : this.readers).reserve(request.expected_epoch);
+        return this.enqueue(scopes, (id, signal, progress) => this.source.compare(request, id, lease, signal, progress), lease, !lexical);
     }
     createLiteral(input: unknown) { const parsed = LiteralRequest.safeParse(input); if (!parsed.success)
         throw new DsearchError('INVALID_REQUEST'); const request = parsed.data; this.source.validateCollections(request.collections); this.admit(); return this.enqueue(request.collections, (id, signal, progress) => this.source.literal(request, id, signal, progress)); }
     private enqueue(scopes: string[], operation: (id: string, signal: AbortSignal, progress: (event: {
         phase: string;
         completed: number;
-    }) => void) => Promise<SearchComplete>, lease?: ReadLease) {
+    }) => void) => Promise<SearchComplete>, lease?: ReadLease, native = true) {
         const id = randomUUID(), session: Session = { id, scopes, status: { search_id: id, state: 'queued', phase: 'queued' }, controller: new AbortController(), lastAccess: this.now(), running: false, expired: false, bytes: 128, listeners: new Set(), ...(lease ? { lease } : {}) };
         this.values.set(id, session);
         const acceptedAt = performance.now();
-        const task = (lease ? this.tail : this.literalTail).then(async () => {
+        const task = (lease ? native ? this.tail : this.lexicalTail : this.literalTail).then(async () => {
             if (session.controller.signal.aborted || session.expired)
                 return;
             session.running = true;
@@ -86,11 +90,11 @@ export class SearchSessions {
                 let queueMs = 0;
                 const execute = async () => {
                     queueMs = performance.now() - acceptedAt;
-                    if (lease && this.readers.unloadExcept) await this.readers.unloadExcept(lease.snapshot.generation_id);
+                    if (lease && native && this.readers.unloadExcept) await this.readers.unloadExcept(lease.snapshot.generation_id);
                     return operation(id, session.controller.signal, event => { if (!session.controller.signal.aborted) this.update(session, { search_id: id, state: 'running', phase: event.phase, completed: event.completed }); });
                 };
-                if (lease && this.settings.lane?.busy) this.update(session, { search_id: id, state: 'running', phase: 'waiting-model' });
-                const result = lease && this.settings.lane ? await this.settings.lane.run(session.controller.signal, execute) : await execute();
+                if (lease && native && this.settings.lane?.busy) this.update(session, { search_id: id, state: 'running', phase: 'waiting-model' });
+                const result = lease && native && this.settings.lane ? await this.settings.lane.run(session.controller.signal, execute) : await execute();
                 if (session.controller.signal.aborted)
                     throw new DsearchError('CANCELLED');
                 if (result.purpose !== 'compare' && result.effective_mode !== 'literal') { result.telemetry.queue_ms = queueMs;result.telemetry.total_ms = performance.now() - acceptedAt; }
@@ -106,7 +110,7 @@ export class SearchSessions {
                 this.sweep();
             }
         }).finally(() => { this.free(session); });
-        if (lease) this.tail = task.catch(() => { });else this.literalTail = task.catch(() => { });
+        if (lease && native) this.tail = task.catch(() => { });else if (lease) this.lexicalTail = task.catch(() => { });else this.literalTail = task.catch(() => { });
         return { search_id: id, state: 'queued' as const, status_url: '/v1/searches/' + id, events_url: '/v1/searches/' + id + '/events' };
     }
     private update(session: Session, status: SearchStatus): void {
@@ -167,6 +171,6 @@ export class SearchSessions {
         }
     }
     async close(): Promise<void> { this.closing = true; clearInterval(this.timer); for (const s of this.values.values())
-        s.controller.abort(); await Promise.allSettled([this.tail, this.literalTail]); for (const s of this.values.values())
-        this.free(s); this.values.clear(); await this.readers.close(); }
+        s.controller.abort(); await Promise.allSettled([this.tail, this.literalTail, this.lexicalTail]); for (const s of this.values.values())
+        this.free(s); this.values.clear(); await Promise.all([this.readers.close(), this.settings.lexicalReaders?.close()]); }
 }

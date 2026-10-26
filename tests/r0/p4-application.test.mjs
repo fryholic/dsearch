@@ -53,7 +53,7 @@ test('actual product hybrid, rerank, supplemental evidence, related/compare, mod
   await t.test('build and search share one lane; a queued search retains its prepublication generation',async()=>{
    assert.equal(app.builder.options.lane,app.sessions.settings.lane);const before=app.status().generation.generation_id;
    const build=app.builder.start(),accepted=await api('POST','/v1/searches',base);await build.completion;
-   const done=await wait(accepted.status_url);assert.equal(done.state,'completed',JSON.stringify(done));assert.equal(done.generation_id,before);assert.notEqual(app.status().generation.generation_id,before);assert.ok(app.status().execution.resident_workers<=1);assert.ok(done.telemetry.queue_ms>0);
+   const done=await wait(accepted.status_url);assert.equal(done.state,'completed',JSON.stringify(done));assert.equal(done.generation_id,before);assert.notEqual(app.status().generation.generation_id,before);assert.ok(app.sessions.readers.residentWorkers<=1);assert.ok(app.sessions.settings.lexicalReaders.residentWorkers<=1);assert.ok(app.status().execution.resident_workers<=2);assert.ok(done.telemetry.queue_ms>0);
    const fresh=await search(base);assert.equal(fresh.generation_id,app.status().generation.generation_id);
   });
   await t.test('idle workers really exit and the same sealed generation can reload',async()=>{

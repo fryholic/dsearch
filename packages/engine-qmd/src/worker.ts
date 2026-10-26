@@ -26,7 +26,7 @@ type Module = {
   runDsearchRequest<T>(request: unknown, operation: () => Promise<T>): Promise<T>;
 };
 let sdk: Module, store: Store | undefined, cache: unknown, strict = true, engineRoot = "";
-let role: "probe" | "builder" | "reader" | "maintenance" = "probe", allowedCollections = ["probe"], semanticCollections = ["probe"];
+let role: "probe" | "builder" | "reader" | "lexical-reader" | "maintenance" = "probe", allowedCollections = ["probe"], semanticCollections = ["probe"];
 let active: { id: string; controller: AbortController } | undefined;
 let requestStats: Stats | undefined;
 let modelErrors: Record<string, unknown> = {};
@@ -60,10 +60,10 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
     strict = payload.strict === true;
     if (strict && !["EP-01", "EP-02", "EP-03", "EP-04"].every(key => sdk.dsearchCapabilities?.[key] === true))
       throw new DsearchError("COMPATIBILITY_FAILED");
-    if (payload.role !== undefined && !["probe", "builder", "reader", "maintenance"].includes(String(payload.role))) throw new DsearchError("INVALID_REQUEST");
+    if (payload.role !== undefined && !["probe", "builder", "reader", "lexical-reader", "maintenance"].includes(String(payload.role))) throw new DsearchError("INVALID_REQUEST");
     role = (payload.role ?? "probe") as typeof role;
     if (role !== "probe" && (typeof payload.generationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(payload.generationId))) throw new DsearchError("INVALID_REQUEST");
-    if (role === "reader" && sdk.dsearchCapabilities?.sealedReadOnly !== true) throw new DsearchError("COMPATIBILITY_FAILED");
+    if (["reader", "lexical-reader"].includes(role) && sdk.dsearchCapabilities?.sealedReadOnly !== true) throw new DsearchError("COMPATIBILITY_FAILED");
     const requestedCollections = payload.collections ? object(payload.collections) : { probe: { path: string(payload.collectionPath), pattern: "**/*.md" } };
     const collections = Object.fromEntries(Object.entries(requestedCollections).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, value]) => {
       const entry = object(value);if (entry.pattern !== "**/*.md") throw new DsearchError("INVALID_REQUEST");
@@ -74,7 +74,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
     for (const value of Object.values(collections)) { const entry = object(value);string(entry.path);if (entry.pattern !== "**/*.md") throw new DsearchError("INVALID_REQUEST"); }
     semanticCollections = Array.isArray(payload.semanticCollections) ? payload.semanticCollections.map(string) : [...allowedCollections];
     if (semanticCollections.some(key => !allowedCollections.includes(key))) throw new DsearchError("INVALID_REQUEST");
-    try { store = await sdk.createStore({ dbPath: string(payload.dbPath), dsearchReadOnly: role === "reader", config: {
+    try { store = await sdk.createStore({ dbPath: string(payload.dbPath), dsearchReadOnly: ["reader", "lexical-reader"].includes(role), config: {
       collections,
       models: { embed: string(payload.embedModel), rerank: string(payload.rerankModel), generate: join(root, "not-installed.gguf") },
     } }); } catch { throw new DsearchError("COMPATIBILITY_FAILED"); }
@@ -83,6 +83,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
   }
   if (!store) throw new DsearchError("COMPATIBILITY_FAILED");
   if (role === "maintenance" && !["index_audit", "snapshot", "close"].includes(method)) throw new DsearchError("SCOPE_DENIED");
+  if (role === "lexical-reader" && !["search", "search_receipt", "lexical_matches", "close"].includes(method)) throw new DsearchError("SCOPE_DENIED");
   const args = object(payload.args ?? {}), current = store;
   if (role === "reader" && ["update", "embed", "embed_step"].includes(method)) throw new DsearchError("SCOPE_DENIED");
   const stats = strict ? sdk.compatibilityStats() : {};
@@ -170,6 +171,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
         if (capture && (!strict || sdk.dsearchCapabilities?.candidateReceipt !== true)) throw new DsearchError('COMPATIBILITY_FAILED');
         let receipt: CandidateReceipt | undefined;
         const request = EngineSearchRequest.parse(args);
+        if (role === 'lexical-reader' && (request.mode !== 'lexical' || request.rerank)) throw new DsearchError('SCOPE_DENIED');
         if (request.collections.some(id => !allowedCollections.includes(id))) throw new DsearchError("SCOPE_DENIED");
         const filter = request.filter ? compileFilter(request.filter) : undefined;
         const line = request.query.replace(/\s+/g, " "), lexical = request.lexical_query ?? line;
@@ -194,7 +196,7 @@ async function execute(payload: Record<string, unknown>, signal: AbortSignal, id
           return values.map(value => {
             const file = typeof value.file === "string" ? value.file : typeof value.filepath === "string" ? value.filepath : undefined;
             if (!file) throw new DsearchError("COMPATIBILITY_FAILED");
-            return role === "reader" ? { file, score: value.score } : { ...value, file };
+            return ["reader", "lexical-reader"].includes(role) ? { file, score: value.score } : { ...value, file };
           });
         };
         let mode = request.mode, rerank = request.rerank;
