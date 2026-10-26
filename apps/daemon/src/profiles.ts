@@ -35,6 +35,7 @@ export class ProfileController {
   roles(profile: ProfileManifest): string[] { return [profile.models.embed.dimension === 1024 ? 'embed' : 'reference', 'rerank']; }
   private makeBuilder(profile: ProfileManifest, requireAll = false) {
     return new GenerationBuilder(this.catalog, { engineRoot: this.options.engineRoot, modelRoot: this.options.modelRoot, profile, embedRole: profile.models.embed.dimension === 1024 ? 'embed' : 'reference', lane: this.options.lane,
+      beforeResume: async () => this.options.readers.unloadExcept(),
       beforeWork: async signal => { await this.options.readers.unloadExcept();if (requireAll) await this.options.models.check(this.roles(profile), signal, () => {}); } });
   }
   list() {

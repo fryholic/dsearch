@@ -109,6 +109,7 @@ export class ReaderPool {
         for (const entry of this.entries.values()) if (entry.snapshot.generation_id !== generationId && entry.ready) {
             await entry.tail;await entry.ready.then(reader => reader.worker.close(), () => {});delete entry.ready;delete entry.worker;
         }
+        await Promise.allSettled([...this.closings]);
     }
     private async load(snapshot: Snapshot, entry: Entry): Promise<Reader> {
         const root = join(this.catalog.state.root, 'generations', snapshot.generation_id);

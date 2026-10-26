@@ -26,3 +26,12 @@ test('related query never spends its entire budget on heading context',async()=>
  for(const counter of [undefined,async q=>[...q].length]){const plan=await relatedQuery(text,selected,counter);assert.ok(plan.query.includes('Selected ECDH definition.'));assert.ok(plan.used_spans.some(l=>selectionRange(text,l).start===selected.start));}
  await assert.rejects(relatedQuery('# Heading\n\n   ',{start:11,end:14}),{code:'INVALID_QUERY'});
 });
+
+test('interactive search wins a bounded burst while background work cannot starve',async()=>{
+ const lane=new HeavyLane(),signal=new AbortController().signal,order=[],release=await lane.acquire(signal,'background');
+ const background=lane.run(signal,async()=>{order.push('build');},'background');const searches=Array.from({length:7},(_,i)=>lane.run(signal,async()=>{order.push('search'+i);}));
+ assert.equal(lane.queued,8);assert.equal(lane.interactiveQueued,7);release();release();await Promise.all([background,...searches]);assert.deepEqual(order,['search0','search1','search2','build','search3','search4','search5','search6']);assert.equal(lane.busy,false);
+});
+test('aborting a queued background turn removes it without releasing another owner',async()=>{
+ const lane=new HeavyLane(),signal=new AbortController().signal,controller=new AbortController(),release=await lane.acquire(signal);const cancelled=lane.acquire(controller.signal,'background');controller.abort();await assert.rejects(cancelled,{code:'CANCELLED'});assert.equal(lane.busy,true);assert.equal(lane.queued,0);release();assert.equal(lane.busy,false);
+});

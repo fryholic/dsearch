@@ -19,6 +19,7 @@ type Session = {
 export class SearchSessions {
     private readonly values = new Map<string, Session>();
     private tail: Promise<void> = Promise.resolve();
+    private literalTail: Promise<void> = Promise.resolve();
     private closing = false;
     private readonly timer: ReturnType<typeof setInterval>;
     constructor(readonly source: SourceSearch, readonly readers: ReaderPool, readonly settings: {
@@ -76,7 +77,7 @@ export class SearchSessions {
         const id = randomUUID(), session: Session = { id, scopes, status: { search_id: id, state: 'queued', phase: 'queued' }, controller: new AbortController(), lastAccess: this.now(), running: false, expired: false, bytes: 128, listeners: new Set(), ...(lease ? { lease } : {}) };
         this.values.set(id, session);
         const acceptedAt = performance.now();
-        const task = this.tail.then(async () => {
+        const task = (lease ? this.tail : this.literalTail).then(async () => {
             if (session.controller.signal.aborted || session.expired)
                 return;
             session.running = true;
@@ -88,8 +89,8 @@ export class SearchSessions {
                     if (lease && this.readers.unloadExcept) await this.readers.unloadExcept(lease.snapshot.generation_id);
                     return operation(id, session.controller.signal, event => { if (!session.controller.signal.aborted) this.update(session, { search_id: id, state: 'running', phase: event.phase, completed: event.completed }); });
                 };
-                if (this.settings.lane?.busy) this.update(session, { search_id: id, state: 'running', phase: 'waiting-model' });
-                const result = this.settings.lane ? await this.settings.lane.run(session.controller.signal, execute) : await execute();
+                if (lease && this.settings.lane?.busy) this.update(session, { search_id: id, state: 'running', phase: 'waiting-model' });
+                const result = lease && this.settings.lane ? await this.settings.lane.run(session.controller.signal, execute) : await execute();
                 if (session.controller.signal.aborted)
                     throw new DsearchError('CANCELLED');
                 if (result.purpose !== 'compare' && result.effective_mode !== 'literal') { result.telemetry.queue_ms = queueMs;result.telemetry.total_ms = performance.now() - acceptedAt; }
@@ -105,7 +106,7 @@ export class SearchSessions {
                 this.sweep();
             }
         }).finally(() => { this.free(session); });
-        this.tail = task.catch(() => { });
+        if (lease) this.tail = task.catch(() => { });else this.literalTail = task.catch(() => { });
         return { search_id: id, state: 'queued' as const, status_url: '/v1/searches/' + id, events_url: '/v1/searches/' + id + '/events' };
     }
     private update(session: Session, status: SearchStatus): void {
@@ -166,6 +167,6 @@ export class SearchSessions {
         }
     }
     async close(): Promise<void> { this.closing = true; clearInterval(this.timer); for (const s of this.values.values())
-        s.controller.abort(); await this.tail; for (const s of this.values.values())
+        s.controller.abort(); await Promise.allSettled([this.tail, this.literalTail]); for (const s of this.values.values())
         this.free(s); this.values.clear(); await this.readers.close(); }
 }
