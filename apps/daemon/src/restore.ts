@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {StateStore,Catalog,canonicalJSON,digest,within} from '@dsearch/catalog';
 import {DsearchError,ProfileManifest} from '@dsearch/contracts';
-import {readBackup,atomicFile,verifySeal,sealFiles,BackupStore,createAlphaProfile,privateDirectory,durableFile,copyBackupFile} from '@dsearch/generations';
+import {readBackup,atomicFile,verifySeal,sealFiles,BackupStore,createAlphaProfile,privateDirectory,durableFile,copyBackupFiles} from '@dsearch/generations';
 import {fileDigest,verifyModel} from '@dsearch/runtime';
 import {QmdWorker,type OpenEngine,type EngineResponse} from '@dsearch/engine-qmd';
 import {privateRoot,takeOwnership,takeRestoreOwnership,restoreJournalPath,restoreLockPath} from './owner.js';
@@ -62,9 +62,9 @@ async function trustedEngine(artifactSha:string,patchSha:string):Promise<string>
  for(const path of [join(workspace,'.local/qmd-audited'),join(workspace,'.local/qmd-recovery'),join(workspace,'.local/qmd-upstream')]){try{const artifact=JSON.parse(await readFile(join(path,'dsearch-artifact.json'),'utf8'));if(artifact.artifact_sha256===artifactSha&&artifact.patch_digest===patchSha)return path;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}}
  throw new DsearchError('COMPATIBILITY_FAILED');
 }
-async function prepareStage(backupPath:string,stage:string,target:string):Promise<{backup_id:string;backup_sha256:string;source_changes:number;scope_incomplete:boolean;rebuild_required:boolean;models_ready:boolean;source_fingerprint:string}>{
+async function prepareStage(backupPath:string,stage:string,target:string,fault?:RestoreOptions['fault']):Promise<{backup_id:string;backup_sha256:string;source_changes:number;scope_incomplete:boolean;rebuild_required:boolean;models_ready:boolean;source_fingerprint:string}>{
  const {manifest,sha256}=await readBackup(backupPath),backupRoot=await realpath(backupPath);await privateDirectory(stage);
- for(const file of manifest.files)await copyBackupFile(backupRoot,file.path,stage,file);
+ await copyBackupFiles(backupRoot,manifest.files,stage,undefined,()=>fault?.('restore-copy-batch'));
  const sourceDb=new DatabaseSync(join(stage,'state.sqlite'),{readOnly:true});try{if(Number(sourceDb.prepare('PRAGMA user_version').get()!.user_version)!==manifest.state_schema||sourceDb.prepare('PRAGMA integrity_check').get()?.integrity_check!=='ok'||sourceDb.prepare('PRAGMA foreign_key_check').all().length)throw new DsearchError('COMPATIBILITY_FAILED');const rows=sourceDb.prepare('SELECT generation_id,state,manifest_sha256 FROM generations ORDER BY generation_id').all();if(canonicalJSON(rows)!==canonicalJSON([...manifest.generations].sort((a,b)=>a.generation_id.localeCompare(b.generation_id))))throw new DsearchError('COMPATIBILITY_FAILED');}finally{sourceDb.close();}
  const state=await StateStore.open(stage),catalog=new Catalog(state,target);let source_changes=0,scope_incomplete=false,rebuild_required=false,models_ready=true,runtimeMismatch=false,source_fingerprint="";
  try{
@@ -106,7 +106,7 @@ export async function restoreBackup(options:RestoreOptions):Promise<RestoreRepor
   }
   await atomicFile(restoreJournalPath(target),canonicalJSON({schema_version:1,operation_id:id,target,stage,previous,phase:'preparing',owner_instance:instance,state_sha256:null,report:null})+'\n');await options.fault?.('restore-preparing');
   const backupPath=await realpath(options.backupPath);if(within(backupPath,target))throw new DsearchError('SCOPE_DENIED');
-  const prepared=await prepareStage(backupPath,stage,target),value={...prepared,target_root:target,target_exists:current.exists,current_history:current.history,current_fingerprint:current.fingerprint},report:RestoreReport={plan_id:digest(canonicalJSON(value)),backup_id:prepared.backup_id,backup_sha256:prepared.backup_sha256,backup_path:backupPath,target_root:target,target_exists:current.exists,current_history:current.history,source_changes:prepared.source_changes,scope_incomplete:prepared.scope_incomplete,rebuild_required:prepared.rebuild_required,models_ready:prepared.models_ready,applied:false,previous_archive:null,previous_backup:null};
+  const prepared=await prepareStage(backupPath,stage,target,options.fault),value={...prepared,target_root:target,target_exists:current.exists,current_history:current.history,current_fingerprint:current.fingerprint},report:RestoreReport={plan_id:digest(canonicalJSON(value)),backup_id:prepared.backup_id,backup_sha256:prepared.backup_sha256,backup_path:backupPath,target_root:target,target_exists:current.exists,current_history:current.history,source_changes:prepared.source_changes,scope_incomplete:prepared.scope_incomplete,rebuild_required:prepared.rebuild_required,models_ready:prepared.models_ready,applied:false,previous_archive:null,previous_backup:null};
   if(!options.apply)return report;if(options.planId!==report.plan_id)throw new DsearchError('STALE_EPOCH');
   if(current.exists&&current.fingerprint!=='empty'&&current.history){let state:StateStore|undefined;try{state=await StateStore.open(target);const info=await new BackupStore(new Catalog(state),{protectedIds:[prepared.backup_id]}).create();report.previous_backup=join(previous,'backups',info.backup_id);}catch(error){if(!(error instanceof DsearchError&&error.code==='COMPATIBILITY_FAILED'))throw error;}finally{state?.close();}}
   if(current.exists&&within(target,backupPath))report.backup_path=join(previous,relative(target,backupPath));

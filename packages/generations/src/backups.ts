@@ -19,14 +19,28 @@ export async function copyBackupFile(from:string,path:string,to:string,expected?
  try{await copyFile(join(from,path),temporary);await chmod(temporary,0o600);await durableFile(temporary);const after=await fileEntry(from,path);if(after.sha256!==before.sha256||await fileDigest(temporary)!==before.sha256)throw new DsearchError('STALE_REVISION');await rename(temporary,destination);await durableFile(dirname(destination));return before;}
  catch(error){await rm(temporary,{force:true});throw error;}
 }
-export async function copyBackupTree(from:string,to:string,relative='',files:BackupEntry[]=[],signal?:AbortSignal):Promise<BackupEntry[]>{
+export async function copyBackupFiles(from:string,entries:readonly (string|BackupEntry)[],to:string,signal?:AbortSignal,afterBatch?:()=>void|Promise<void>):Promise<BackupEntry[]>{
+ const copied:BackupEntry[]=[];
+ for(let offset=0;offset<entries.length;offset+=16){
+  if(signal?.aborted)throw new DsearchError('CANCELLED');
+  const settled=await Promise.allSettled(entries.slice(offset,offset+16).map(entry=>typeof entry==='string'?copyBackupFile(from,entry,to):copyBackupFile(from,entry.path,to,entry)));
+  // No caller may remove a staging directory while a started copy is still writing.
+  const failed=settled.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
+  for(const result of settled)if(result.status==='fulfilled')copied.push(result.value);
+  if(signal?.aborted)throw new DsearchError('CANCELLED');await afterBatch?.();if(signal?.aborted)throw new DsearchError('CANCELLED');
+ }
+ return copied;
+}
+export async function copyBackupTree(from:string,to:string,relative='',files:BackupEntry[]=[],signal?:AbortSignal,afterBatch?:()=>void|Promise<void>):Promise<BackupEntry[]>{
  await privateDirectory(to);
+ const names:string[]=[];
  for(const item of await readdir(from,{withFileTypes:true})){if(signal?.aborted)throw new DsearchError('CANCELLED');const source=join(from,item.name),target=join(to,item.name),path=relative?relative+'/'+item.name:item.name;
   if(item.isSymbolicLink())throw new DsearchError('SCOPE_DENIED');
-  if(item.isDirectory())await copyBackupTree(source,target,path,files,signal);
-  else if(item.isFile()){const copied=await copyBackupFile(from,item.name,to);files.push({...copied,path});}
+  if(item.isDirectory())await copyBackupTree(source,target,path,files,signal,afterBatch);
+  else if(item.isFile())names.push(item.name);
   else throw new DsearchError('SCOPE_DENIED');
  }
+ for(const copied of await copyBackupFiles(from,names,to,signal,afterBatch))files.push({...copied,path:relative?relative+'/'+copied.path:copied.path});
  return files;
 }
 export async function readBackup(folder:string,full=true):Promise<{manifest:BackupManifest;sha256:string}>{
@@ -118,7 +132,7 @@ export class BackupStore{
     if(!info){if(['active','ready','retired'].includes(generation.state))throw new DsearchError('COMPATIBILITY_FAILED');continue;}
     if(!info.isDirectory()||info.isSymbolicLink())throw new DsearchError('SCOPE_DENIED');
     if(['active','ready','retired'].includes(generation.state)){if(!generation.manifest_sha256)throw new DsearchError('COMPATIBILITY_FAILED');await verifySeal(from,generation.manifest_sha256);}
-    await copyBackupTree(from,to,'generations/'+generation.generation_id,files,signal);
+    await copyBackupTree(from,to,'generations/'+generation.generation_id,files,signal,()=>this.options.fault?.('backup-copy-batch'));
    }
    const preferences=join(this.catalog.state.root,'preferences.json');if(await lstat(preferences).then(()=>true,(e:NodeJS.ErrnoException)=>{if(e.code!=='ENOENT')throw e;return false;})){await fileEntry(this.catalog.state.root,'preferences.json');await atomicFile(join(folder,'preferences.json'),await readFile(preferences));files.push(await fileEntry(folder,'preferences.json'));}
    const manifest:BackupManifest={schema_version:1,backup_id:id,created_at:new Date().toISOString(),source_data_root:this.catalog.state.root,state_schema,source_seq,generation_storage:'self-contained-v1',generations,files:files.sort((a,b)=>a.path.localeCompare(b.path))};

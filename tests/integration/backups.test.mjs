@@ -1,13 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,rm,stat,access} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,stat,access,readdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {DatabaseSync,backup as sqliteBackup} from 'node:sqlite';
 import {randomUUID,createHash} from 'node:crypto';
 import {StateStore,Catalog} from '../../packages/catalog/dist/index.js';
-import {BackupStore,readBackup,GenerationGC,pinGeneration} from '../../packages/generations/dist/index.js';
+import {BackupStore,readBackup,GenerationGC,pinGeneration,copyBackupFiles} from '../../packages/generations/dist/index.js';
 async function fixture(t){const temporary=await mkdtemp(join(tmpdir(),'dsearch-backup-')),state=await StateStore.open(temporary),root=state.root,catalog=new Catalog(state);t.after(async()=>{state.close();await rm(root,{recursive:true,force:true});});state.db.prepare("INSERT INTO profiles VALUES ('profile',?,'{}','validated',?)").run('a'.repeat(64),new Date().toISOString());const id=randomUUID(),generation=join(root,'generations',id);await mkdir(generation,{recursive:true,mode:0o700});await writeFile(join(generation,'fixture.md'),'original index bytes');state.db.prepare("INSERT INTO generations VALUES (?,?,?,'invalid',?,0,NULL,'{}',?,NULL)").run(id,'profile','a'.repeat(64),generation,new Date().toISOString());return {root,state,catalog,id};}
+test('a failed file batch drains every started durable copy and does not start a later batch',async t=>{
+ const {root}=await fixture(t),from=join(root,'from'),to=join(root,'to');await mkdir(from,{mode:0o700});await mkdir(to,{mode:0o700});
+ const names=Array.from({length:32},(_,i)=>i+'.md');for(const name of names)await writeFile(join(from,name),'content '+name);
+ const entries=[{path:names[0],bytes:Buffer.byteLength('content '+names[0]),sha256:'0'.repeat(64)},...names.slice(1)];
+ await assert.rejects(copyBackupFiles(from,entries,to),{code:'COMPATIBILITY_FAILED'});assert.equal((await readdir(to)).length,15);
+ for(const name of names.slice(1,16)){assert.equal(await readFile(join(to,name),'utf8'),'content '+name);assert.equal((await stat(join(to,name))).mode&0o777,0o600);}
+ for(const name of names.slice(16))await assert.rejects(access(join(to,name)),{code:'ENOENT'});
+ await rm(to,{recursive:true});await new Promise(resolve=>setTimeout(resolve,30));await assert.rejects(access(to),{code:'ENOENT'});
+});
+for(const cancel of [false,true])test('a '+(cancel?'cancelled':'failed')+' backup batch leaves no late staging writes and preserves existing archives',async t=>{
+ const {root,catalog,id}=await fixture(t),store=new BackupStore(catalog),first=await store.create(),generation=join(root,'generations',id),controller=new AbortController();
+ for(let i=0;i<40;i++)await writeFile(join(generation,i+'.md'),'unchanged index fixture '+i);
+ let batches=0;const faulty=new BackupStore(catalog,{fault:phase=>{if(phase==='backup-copy-batch'){batches++;if(cancel)controller.abort();else throw new Error('copy boundary failure');}}});
+ if(cancel)await assert.rejects(faulty.create(controller.signal),{code:'CANCELLED'});else await assert.rejects(faulty.create(),/copy boundary failure/);
+ assert.equal(batches,1);assert.equal((await store.list()).length,1);await readBackup(first.path);assert.equal((await readdir(join(root,'backups'))).filter(name=>name.endsWith('.tmp')).length,0);
+ for(let i=0;i<40;i++)assert.equal(await readFile(join(generation,i+'.md'),'utf8'),'unchanged index fixture '+i);
+ assert.ok((await new GenerationGC(catalog).preview({keep_retired:0,min_age_seconds:0})).candidates.some(g=>g.generation_id===id));
+});
 test('consistent backups include committed WAL, generation bytes and preferences while excluding credentials',async t=>{
  const {root,state,catalog,id}=await fixture(t);await mkdir(join(root,'credentials'));await writeFile(join(root,'credentials','device-token'),'never-copy-this-token');await writeFile(join(root,'preferences.json'),'{}\n');state.advance();
  const store=new BackupStore(catalog),info=await store.create(),{manifest}=await readBackup(info.path);assert.equal(manifest.source_seq,1);assert.equal(manifest.generations[0].generation_id,id);assert.ok(manifest.files.some(f=>f.path==='preferences.json'));assert.ok(manifest.files.every(f=>!f.path.includes('credentials')));await assert.rejects(access(join(info.path,'credentials')));assert.equal((await stat(join(info.path,'state.sqlite'))).mode&0o777,0o600);
