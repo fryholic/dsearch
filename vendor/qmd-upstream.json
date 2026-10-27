@@ -4,22 +4,30 @@
   "commit": "86d2365d17fc682e491c2c53d1e4a884aee8682a",
   "license": "MIT",
   "integrationStatus": "implemented",
+  "dependencyOverrides": {
+    "@modelcontextprotocol/server": "2.3.0",
+    "@simple-git/argv-parser": "2.0.1",
+    "nanoid": "5.1.16",
+    "simple-git": "4.0.1",
+    "tar": "7.5.21",
+    "zod": "4.6.6"
+  },
   "requiredCompatibilityPatches": [
     "EP-01",
     "EP-02",
     "EP-03",
     "EP-04"
   ],
-  "engineArtifactSha256": "ef82812583f3e4837d05b2da3ba193fec87f583f8de2cbd2d24caea9421f48a3",
+  "engineArtifactSha256": "dfdcb7e25004b552e3a95bb19aefb4fce77c4e53e9cde78bc075a6118a5807f6",
   "patchSha256": "684c5f6dfdf59a586686b8672d8f2bdac30c1f82f18f6fdc92496b282af190d2",
   "recovery": {
     "patchFile": "recovery-v1.patch",
     "patchSha256": "128eb41324b22560164f41df2345fc18cf6e88087b296b46bf749d2e15ce8bc4",
-    "engineArtifactSha256": "c41ff2a2b105352723fc8fb157c4f29c34bd1cee4bb0021e24130a3ff4cfb94c"
+    "engineArtifactSha256": "d1c6f749c768a64d91e976800486a074442f77995453c163b2f612223dd8f2db"
   },
   "audited": {
     "patchFile": "audited-v1.patch",
     "patchSha256": "13250bfae4a4d69dec66e53c69622a3c8af0e799ddb9da892d4df31aed0b5edc",
-    "engineArtifactSha256": "c33b800d0aafbfdb8d6856ce21eebd0e816e9504dc1e01500a846761787af1ce"
+    "engineArtifactSha256": "393a1bb41be65019ec31ec688f08cde15889ce1e11befe19fdbc188682d54c9b"
   }
 }

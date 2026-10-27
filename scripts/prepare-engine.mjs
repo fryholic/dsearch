@@ -32,7 +32,8 @@ if(packageInfo.version!==source.sourceVersion)throw new Error('Upstream source v
 const changed=run('git',['diff','HEAD','--name-only'],engine).trim().split('\n').filter(Boolean);
 if(changed.some(path=>!path.startsWith('src/')&&path!=='pnpm-lock.yaml'))throw new Error('Managed checkout has changes outside the pinned patch and lock');
 await copyFile(join(root,'vendor/qmd-lock.yaml'),join(engine,'pnpm-lock.yaml'));
-await writeFile(join(engine,'pnpm-workspace.yaml'),`packages: []\nallowBuilds:\n  better-sqlite3: true\n  node-llama-cpp: true\n  esbuild: true\n  tree-sitter-go: true\n  tree-sitter-python: true\n  tree-sitter-rust: true\n  tree-sitter-typescript: true\n`);
+const overrides=Object.entries(registry.dependencyOverrides??{}).map(([name,version])=>`  ${JSON.stringify(name)}: ${JSON.stringify(version)}`).join('\n');
+await writeFile(join(engine,'pnpm-workspace.yaml'),`packages: []\nallowBuilds:\n  better-sqlite3: true\n  node-llama-cpp: true\n  esbuild: true\n  tree-sitter-go: true\n  tree-sitter-python: true\n  tree-sitter-rust: true\n  tree-sitter-typescript: true\n${overrides?'overrides:\n'+overrides+'\n':''}`);
 run('pnpm',['install','--frozen-lockfile','--ignore-scripts'],engine);
 run('pnpm',['rebuild','better-sqlite3','node-llama-cpp','tree-sitter-go','tree-sitter-python','tree-sitter-rust','tree-sitter-typescript'],engine);
 run(process.execPath,['scripts/build.mjs'],engine);
