@@ -9,3 +9,5 @@ coverage/
 .DS_Store
 .pnpm-store/
 dist-web/
+# Local SDKs, model weights, development data and credentials
+/.local/
