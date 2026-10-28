@@ -324,6 +324,8 @@ pnpm dsearch restore /absolute/path/to/backup-folder \
 
 복원은 원문 파일을 덮어쓰지 않습니다. 기존 대상 데이터는 교체 전에 별도 경로로 보존하고 반환된 `previous_archive`에서 확인할 수 있습니다. 원문 경로·내용·실행 환경이 달라지면 `rebuild_required`, 모델을 준비해야 하면 `models_ready: false`로 알립니다. 복원된 데이터로 실행할 때는 CLI·GUI·MCP에 같은 `--data-root`를 지정합니다.
 
+엔진·의존성 갱신으로 프로필이 달라진 지원 대상 백업은 현재 엔진으로 검증한 뒤 새 색인을 요구합니다. `rebuild_required: true`인 데이터는 `reconcile`을 완료해야 검색할 수 있습니다. 호환성을 확인할 수 없는 엔진이나 백업 형식은 복원을 거부합니다.
+
 중단된 색인 작업은 입력·프로필·체크포인트가 현재 상태와 일치할 때 GUI의 **재개** 또는 `jobs retry JOB_ID`로 이어갈 수 있습니다. 입력이 달라진 경우 새 `reconcile`을 실행하세요. 메모리 부족은 배치를 줄여 한 번 재시도하고, 반복 실패는 기존 활성 색인을 유지한 채 오류로 종료합니다.
 
 ## Data and privacy
