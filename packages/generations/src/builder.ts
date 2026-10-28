@@ -91,11 +91,6 @@ export class GenerationBuilder {
     let validationCalls=0,committedResult:BuildResult|undefined;
     let releaseLane: (() => void) | undefined;let yields = 0;
     try {
-      if (this.options.lane) {
-        this.phase(jobId, "waiting-model");
-        releaseLane = await this.options.lane.acquire(signal, "background");check();
-      }
-      await this.options.beforeWork?.(signal);
       check();this.phase(jobId, "reconciling");
       const collections = this.catalog.listCollections().filter(c => c.enabled);
       if (!collections.length || collections.length > 32) throw new DsearchError("INVALID_REQUEST");
@@ -126,19 +121,42 @@ export class GenerationBuilder {
       }
       const reuse = full || restored ? undefined : await snapshotForReuse(this.catalog, fp, engine, signal);
       releaseBase=reuse?.release;
+      const previousInputs = new Map(reuse?.inputs.map(input=>[input.doc_id,canonicalJSON(input)]));
+      const previousCoverageById = new Map(reuse?.coverage.map(doc=>[doc.doc_id,doc]));
+      const previousPassagesById = new Map<string, IndexedPassage[]>();
+      for (const passage of reuse?.mappings ?? []) { const list = previousPassagesById.get(passage.doc_id) ?? [];list.push(passage);previousPassagesById.set(passage.doc_id,list); }
+      const reusableCoverage = new Map<string, GenerationDocument>(), reusedFiles: string[] = [];
+      for (const doc of restored ? [] : docs) {
+        if (doc.eligibility !== 'eligible' || !doc.latest_revision_id) continue;
+        const input: SourceInput = {doc_id:doc.doc_id,revision_id:doc.latest_revision_id,relative_path:doc.relative_path,scope_fp:scopes[doc.collection_id]!};
+        const previous = previousInputs.get(doc.doc_id) === canonicalJSON(input) ? previousCoverageById.get(doc.doc_id) : undefined;
+        if (!previous || !['included','partial','lexical_only','excluded'].includes(previous.state)) continue;
+        reusableCoverage.set(doc.doc_id,previous);
+        for (const passage of previousPassagesById.get(doc.doc_id) ?? []) reusedFiles.push('projection/'+passage.engine_collection+'/'+passage.engine_relative_path);
+      }
+      // Reconcile and copy immutable inputs before reserving model execution.
+      // The previous generation stays pinned; current revisions are verified below.
+      for (let offset = 0; offset < reusedFiles.length; offset += 16) {
+        check();this.phase(jobId,'compiling',{completed:0,total:docs.length,copied_reused:offset,total_reused:reusedFiles.length});
+        const copied = await Promise.allSettled(reusedFiles.slice(offset,offset+16).map(async path => {
+          const bytes=await readFile(join(reuse!.directory,path));check();await atomicFile(join(directory,path),bytes);
+        }));
+        const failure=copied.find(result=>result.status==='rejected');
+        if(failure?.status==='rejected')throw failure.reason;
+        await this.options.fault?.('reuse-copy-batch');check();
+      }
+      if (this.options.lane) {
+        this.phase(jobId,'waiting-model');releaseLane=await this.options.lane.acquire(signal,'background');check();
+      }
+      await this.options.beforeWork?.(signal);check();
       const opened=await builder.open(engine,{signal}) as {capabilities?:{boundedEmbedCalls?:boolean}};check();
       if (!reuse && !restored) {
         const probe = await builder.invoke<EngineResponse<{ dimension: number; norm: number }>>("embedding", { text: "dsearch dimension validation probe", title: "", isQuery: true }, { signal });
         validationCalls=Number(probe.stats.embeddingCalls??0);
         if (probe.result.dimension !== profile.models.embed.dimension || !Number.isFinite(probe.result.norm) || probe.result.norm <= 0) throw new DsearchError("COMPATIBILITY_FAILED");
       }
-      const previousInputs = new Map(reuse?.inputs.map(input=>[input.doc_id,canonicalJSON(input)]));
-      const previousCoverageById = new Map(reuse?.coverage.map(doc=>[doc.doc_id,doc]));
-      const previousPassagesById = new Map<string, IndexedPassage[]>();
-      for (const passage of reuse?.mappings ?? []) { const list = previousPassagesById.get(passage.doc_id) ?? [];list.push(passage);previousPassagesById.set(passage.doc_id,list); }
       const inputs: SourceInput[] = [];let reusedDocuments = 0;
       const coverage: GenerationDocument[] = [], mappings: IndexedPassage[] = [], files: string[] = [];
-      const reusedFiles: string[] = [];
       let completed = 0;
       if(restored){coverage.push(...restored.plan.coverage);mappings.push(...restored.plan.mappings);files.push(...restored.plan.files);inputs.push(...restored.plan.inputs);reusedDocuments=restored.plan.reused_documents;}
       for (const doc of restored ? [] : docs) {
@@ -148,13 +166,12 @@ export class GenerationBuilder {
         }
         const source = await this.catalog.readDocument(doc.doc_id, doc.latest_revision_id), collection = collections.find(c => c.collection_id === doc.collection_id)!;
         const sourceInput = { doc_id: doc.doc_id, revision_id: doc.latest_revision_id, relative_path: doc.relative_path, scope_fp: collection.scope_fp };inputs.push(sourceInput);
-        const cached = previousInputs.get(doc.doc_id) === canonicalJSON(sourceInput);
-        const previousCoverage = cached && previousCoverageById.get(doc.doc_id);
-        if (previousCoverage && ['included','partial','lexical_only','excluded'].includes(previousCoverage.state)) {
+        const previousCoverage = reusableCoverage.get(doc.doc_id);
+        if (previousCoverage) {
           coverage.push(previousCoverage);
           for (const passage of previousPassagesById.get(doc.doc_id) ?? []) {
             const path = "projection/" + passage.engine_collection + "/" + passage.engine_relative_path;
-            reusedFiles.push(path);files.push(path);mappings.push(passage);
+            files.push(path);mappings.push(passage);
           }
           reusedDocuments++;completed++;continue;
         }
@@ -174,18 +191,6 @@ export class GenerationBuilder {
           const { text: _text, ...metadata } = passage;mappings.push({ ...metadata, engine_collection: collectionName, engine_relative_path: relative });
         }
         completed++;
-      }
-      // Each file still commits its own data and directory entry. Bound the I/O
-      // fan-out and drain every batch before indexing, cancellation or failure.
-      for (let offset = 0; offset < reusedFiles.length; offset += 16) {
-        check();
-        const copied = await Promise.allSettled(reusedFiles.slice(offset, offset + 16).map(async path => {
-          const bytes = await readFile(join(reuse!.directory, path));check();
-          await atomicFile(join(directory, path), bytes);
-        }));
-        const failure = copied.find(result => result.status === 'rejected');
-        if (failure?.status === 'rejected') throw failure.reason;
-        await this.options.fault?.('reuse-copy-batch');check();
       }
       this.phase(jobId, "indexing", { passages: mappings.length });await builder.invoke("update", {}, { signal });
       const semanticPassages = mappings.filter(p => p.kind === "semantic").length;
